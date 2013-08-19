@@ -95,7 +95,7 @@ object Plugin extends sbt.Plugin {
     object mongo {
 
       lazy val url = SettingKey[MongoClientURI]("aws-mongo-uri", "Configured Mongo client URI")
-      //lazy val addresses = SettingKey[List[ServerAddress]]("aws-mongo-addresses", "Mongo connection Server Addresses")
+      lazy val addresses = SettingKey[List[ServerAddress]]("aws-mongo-addresses", "Mongo connection Server Addresses")
 
       lazy val client = SettingKey[MongoClient]("aws-mongo-client", "Configured Mongo Client")
       lazy val db = SettingKey[String]("aws-mongo-db", "Mongo DB Name")
@@ -108,7 +108,7 @@ object Plugin extends sbt.Plugin {
     (aws.requests) {
       (requests) => {
         (state: State) =>
-        ((StringBasic <~ Space) ~ requests.map(a => token(a.name <~ Space)).reduceLeft(_ | _))
+        (Space ~> (StringBasic <~ Space) ~ requests.map(a => token(a.name)).reduceLeft(_ | _))
       }
     }
 
@@ -149,7 +149,7 @@ object Plugin extends sbt.Plugin {
           "type" -> instance.getInstanceType(),
           "key-name" -> instance.getKeyName(),
           "state" -> instance.getState().getName()
-        ))
+        ).filter(_._2 != null))
       }.toList)
     }),
 
