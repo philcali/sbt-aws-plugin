@@ -130,8 +130,7 @@ object Plugin extends sbt.Plugin {
   }
 
   def mongoSettings: Seq[Setting[_]] = Seq(
-    aws.mongo.addresses := List(),
-    aws.mongo.client <<= aws.mongo.addresses (MongoClient(_)),
+    aws.mongo.client := MongoClient(),
     aws.mongo.db := "sbt-aws-environment",
     aws.mongo.collectionName := "instances",
     aws.mongo.collection <<= (aws.mongo.client, aws.mongo.db, aws.mongo.collectionName)(_(_)(_))
