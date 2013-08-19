@@ -95,7 +95,7 @@ object Plugin extends sbt.Plugin {
     object mongo {
 
       lazy val url = SettingKey[MongoClientURI]("aws-mongo-uri", "Configured Mongo client URI")
-      lazy val addresses = SettingKey[List[ServerAddress]]("aws-mongo-addresses", "Mongo connection Server Addresses")
+      //lazy val addresses = SettingKey[List[ServerAddress]]("aws-mongo-addresses", "Mongo connection Server Addresses")
 
       lazy val client = SettingKey[MongoClient]("aws-mongo-client", "Configured Mongo Client")
       lazy val db = SettingKey[String]("aws-mongo-db", "Mongo DB Name")
@@ -137,9 +137,6 @@ object Plugin extends sbt.Plugin {
   )
 
   def awsSettings: Seq[Setting[_]] = mongoSettings ++ Seq(
-    aws.requests := Seq(),
-    aws.actions := Seq()
-  ) ++ Seq(
     aws.credentials <<= (aws.key, aws.secret) (new BasicAWSCredentials(_, _)),
     aws.client <<= aws.credentials (new AmazonEC2Client(_)),
 
@@ -165,47 +162,51 @@ object Plugin extends sbt.Plugin {
         .withSecurityGroups("default")
     ),
 
-    aws.requests += JSONAwsFileRequest("local"),
+    aws.requests := Seq(JSONAwsFileRequest("local")),
 
-    aws.actions <+= (aws.client, aws.mongo.collection, aws.requests, aws.configuredInstance) map {
-      (client, collection, requests, configure) =>
-      NamedAwsAction("create", { input =>
-        val request = requests
-          .find(_.name == input)
-          .orElse({
-            Some(
-              NamedAwsRequest("", (_.withFilters(new Filter(input))))
-            )
-          })
-          .map(_.execute(new ImageRequest()))
-        client.describeImages(request.get).getImages.foreach { image =>
-          createInstance(client, collection, configure(image))
-        }
-      })
-    },
-
-    aws.actions <+= (aws.client, aws.jsonFormat, aws.instanceFormat, aws.mongo.collection, streams) map {
-      (client, jsonFormat, instanceFormat, collection, s) =>
-      NamedAwsAction("status", { _ =>
-        val request = (new DescribeInstancesRequest() /: collection)((r, o) => r.withInstanceIds(o.as[String]("instanceId")))
-        s.log.info(JSONArray(client.describeInstances(request).getReservations().map(instanceFormat).toList).toString(jsonFormat))
-      })
-    },
-
-    aws.actions <+= (aws.client, aws.mongo.collection, streams) map {
-      (client, collection, s) =>
-      NamedAwsAction("terminate", { _ =>
-        val request = new TerminateInstancesRequest(collection.map(_.as[String]("instanceId")).toList)
-        client.terminateInstances(request).getTerminatingInstances().foreach { instance =>
-          s.log.success("%s: %s => %s" format (
-            instance.getInstanceId(),
-            instance.getPreviousState(),
-            instance.getCurrentState()
-          ))
-        }
-        s.log.info("Clearing local instance collection")
-        collection.drop()
-      })
+    aws.actions <<= (
+      aws.client,
+      aws.mongo.collection,
+      aws.requests,
+      aws.configuredInstance,
+      aws.jsonFormat,
+      aws.instanceFormat,
+      streams
+    ) map {
+      (client, collection, requests, configure, jsonFormat, instanceFormat, s) => Seq(
+        // Creates an environment
+        NamedAwsAction("create", { input =>
+          val request = requests
+            .find(_.name == input)
+            .orElse({
+              Some(
+                NamedAwsRequest("", (_.withFilters(new Filter(input))))
+              )
+            })
+            .map(_.execute(new ImageRequest()))
+          client.describeImages(request.get).getImages.foreach { image =>
+            createInstance(client, collection, configure(image))
+          }
+        }),
+        // Checks on the environment status
+        NamedAwsAction("status", { _ =>
+          val request = (new DescribeInstancesRequest() /: collection)((r, o) => r.withInstanceIds(o.as[String]("instanceId")))
+          s.log.info(JSONArray(client.describeInstances(request).getReservations().map(instanceFormat).toList).toString(jsonFormat))
+        }),
+        // Terminates the local environment
+        NamedAwsAction("terminate", { _ =>
+          val request = new TerminateInstancesRequest(collection.map(_.as[String]("instanceId")).toList)
+          client.terminateInstances(request).getTerminatingInstances().foreach { instance =>
+            s.log.success("%s: %s => %s" format (
+              instance.getInstanceId(),
+              instance.getPreviousState(),
+              instance.getCurrentState()
+            ))
+          }
+          s.log.info("Clearing local instance collection")
+          collection.drop()
+        })
+      )
     },
 
     aws.run <<= InputTask(actionParser)(runActionTask)
