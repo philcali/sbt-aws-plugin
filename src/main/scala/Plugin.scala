@@ -130,6 +130,7 @@ object Plugin extends sbt.Plugin {
   }
 
   def mongoSettings: Seq[Setting[_]] = Seq(
+    aws.mongo.addresses := List(),
     aws.mongo.client <<= aws.mongo.addresses (MongoClient(_)),
     aws.mongo.db := "sbt-aws-environment",
     aws.mongo.collectionName := "instances",
@@ -137,6 +138,9 @@ object Plugin extends sbt.Plugin {
   )
 
   def awsSettings: Seq[Setting[_]] = mongoSettings ++ Seq(
+    aws.requests := Seq(),
+    aws.actions := Seq()
+  ) ++ Seq(
     aws.credentials <<= (aws.key, aws.secret) (new BasicAWSCredentials(_, _)),
     aws.client <<= aws.credentials (new AmazonEC2Client(_)),
 
