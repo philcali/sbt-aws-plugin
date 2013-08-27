@@ -57,6 +57,7 @@ object Plugin extends sbt.Plugin {
     lazy val jsonFormat = SettingKey[JSONFormat.ValueFormatter]("aws-json-format")
     lazy val instanceFormat = SettingKey[InstanceFormat]("aws-instance-format")
 
+    lazy val scope = SettingKey[String]("aws-scope")
     lazy val requests = SettingKey[Seq[NamedRequest]]("aws-requests")
     lazy val created = TaskKey[InstanceCallback]("aws-created")
     lazy val finished = TaskKey[InstanceCallback]("aws-finished")
@@ -118,6 +119,7 @@ object Plugin extends sbt.Plugin {
             "group" -> input
           )
         )
+        dbObj
       }
   }
 
@@ -132,19 +134,19 @@ object Plugin extends sbt.Plugin {
     )
   }
 
-  def createRequest(group: String, requests: Seq[NamedRequest])(body: ImageRequest => Unit) = group match {
-    case "*" => requests.map(_.execute(new ImageRequest())).foreach(body)
+  def createRequest(group: String, scope: String, requests: Seq[NamedRequest])(body: ImageRequest => Unit) = group match {
+    case "*" => requests.map(_.execute(new ImageRequest().withExecutableUsers(scope))).foreach(body)
     case input => requests
       .find(_.name == group)
       .orElse(Some(NamedAwsRequest("", (_.withFilters(new Filter("name", List(group)))))))
-      .map(_.execute(new ImageRequest()))
+      .map(_.execute(new ImageRequest().withExecutableUsers(scope)))
       .foreach(body)
   }
 
   def mongoSettings: Seq[Setting[_]] = Seq(
     aws.mongo.client := MongoClient(),
     aws.mongo.db := "sbt-aws-environment",
-    aws.mongo.collectionName <<= (name)(_ + "-instances"),
+    aws.mongo.collectionName <<= (name)(_.replace("-", "") + "instances"),
     aws.mongo.collection <<= (aws.mongo.client, aws.mongo.db, aws.mongo.collectionName)(_(_)(_))
   )
 
@@ -152,6 +154,7 @@ object Plugin extends sbt.Plugin {
     aws.credentials <<= (aws.key, aws.secret) (new BasicAWSCredentials(_, _)),
     aws.client <<= aws.credentials (new AmazonEC2Client(_)),
 
+    aws.scope := "self",
     aws.jsonFormat := JSONFormat.defaultFormatter,
     aws.instanceFormat := (reservation => {
       JSONArray(reservation.getInstances().map { instance =>
@@ -187,6 +190,7 @@ object Plugin extends sbt.Plugin {
 
     aws.actions <<= (
       aws.client,
+      aws.scope,
       aws.mongo.collection,
       aws.requests,
       aws.configuredInstance,
@@ -196,21 +200,21 @@ object Plugin extends sbt.Plugin {
       aws.finished,
       streams
     ) map {
-      (client, collection, requests, configure, jsonFormat, instanceFormat, created, finished, s) => Seq(
+      (client, scope, collection, requests, configure, jsonFormat, instanceFormat, created, finished, s) => Seq(
         // Tests a given request input
-        NamedAwsAction("test", (input => createRequest(input, requests) {
+        NamedAwsAction("test", (input => createRequest(input, scope, requests) {
           request =>
           s.log.info("Dry running request group %s" format input)
           client.describeImages(request).getImages.foreach(println)
         })),
         // Creates an environment
-        NamedAwsAction("create", (input => createRequest(input, requests) {
+        NamedAwsAction("create", (input => createRequest(input, scope, requests) {
           request =>
           client.describeImages(request).getImages().foreach {
             image =>
             createInstance(client, collection, image, configure, input) foreach {
               result =>
-              created(result.getField("instanceId").toString)
+              created(result.as[String]("instanceId"))
             }
           }
         })),
@@ -225,19 +229,21 @@ object Plugin extends sbt.Plugin {
                 reservation.getInstances() foreach {
                   instance =>
                   val obj = MongoDBObject("instanceId" -> instance.getInstanceId())
-                  collection.findOne(obj) foreach {
-                    o =>
-                    collection += o ++ (
-                      "state" -> instance.getState().getName(),
-                      "publicDns" -> instance.getPublicDnsName()
-                    )
-                    if (o.as[String]("state") != instance.getState().getName()) {
+                  collection
+                    .findOne(obj)
+                    .filter(_.as[String]("state") != instance.getState().getName())
+                    .foreach {
+                      o =>
+                      collection += o ++ (
+                        "state" -> instance.getState().getName(),
+                        "publicDns" -> instance.getPublicDnsName()
+                      )
                       finished(instance.getInstanceId())
                     }
-                  }
                 }
               }
               if (describeRequest.getInstanceIds().isEmpty) {
+                s.log.info("Shutting down poller for group %s" format input)
                 scheduler.shutdownNow()
               } else {
                 s.log.info("Checking group %s in 10 seconds" format input)
