@@ -57,7 +57,6 @@ object Plugin extends sbt.Plugin {
     lazy val jsonFormat = SettingKey[JSONFormat.ValueFormatter]("aws-json-format")
     lazy val instanceFormat = SettingKey[InstanceFormat]("aws-instance-format")
 
-    lazy val scope = SettingKey[String]("aws-scope")
     lazy val requests = SettingKey[Seq[NamedRequest]]("aws-requests")
     lazy val created = TaskKey[InstanceCallback]("aws-created")
     lazy val finished = TaskKey[InstanceCallback]("aws-finished")
@@ -134,12 +133,12 @@ object Plugin extends sbt.Plugin {
     )
   }
 
-  def createRequest(group: String, scope: String, requests: Seq[NamedRequest])(body: ImageRequest => Unit) = group match {
-    case "*" => requests.map(_.execute(new ImageRequest().withExecutableUsers(scope))).foreach(body)
+  def createRequest(group: String, requests: Seq[NamedRequest])(body: ImageRequest => Unit) = group match {
+    case "*" => requests.map(_.execute(new ImageRequest())).foreach(body)
     case input => requests
       .find(_.name == group)
       .orElse(Some(NamedAwsRequest("", (_.withFilters(new Filter("name", List(group)))))))
-      .map(_.execute(new ImageRequest().withExecutableUsers(scope)))
+      .map(_.execute(new ImageRequest()))
       .foreach(body)
   }
 
@@ -154,7 +153,6 @@ object Plugin extends sbt.Plugin {
     aws.credentials <<= (aws.key, aws.secret) (new BasicAWSCredentials(_, _)),
     aws.client <<= aws.credentials (new AmazonEC2Client(_)),
 
-    aws.scope := "self",
     aws.jsonFormat := JSONFormat.defaultFormatter,
     aws.instanceFormat := (reservation => {
       JSONArray(reservation.getInstances().map { instance =>
@@ -190,7 +188,6 @@ object Plugin extends sbt.Plugin {
 
     aws.actions <<= (
       aws.client,
-      aws.scope,
       aws.mongo.collection,
       aws.requests,
       aws.configuredInstance,
@@ -200,15 +197,15 @@ object Plugin extends sbt.Plugin {
       aws.finished,
       streams
     ) map {
-      (client, scope, collection, requests, configure, jsonFormat, instanceFormat, created, finished, s) => Seq(
+      (client, collection, requests, configure, jsonFormat, instanceFormat, created, finished, s) => Seq(
         // Tests a given request input
-        NamedAwsAction("test", (input => createRequest(input, scope, requests) {
+        NamedAwsAction("test", (input => createRequest(input, requests) {
           request =>
           s.log.info("Dry running request group %s" format input)
           client.describeImages(request).getImages.foreach(println)
         })),
         // Creates an environment
-        NamedAwsAction("create", (input => createRequest(input, scope, requests) {
+        NamedAwsAction("create", (input => createRequest(input, requests) {
           request =>
           client.describeImages(request).getImages().foreach {
             image =>
