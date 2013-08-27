@@ -33,9 +33,15 @@ trait JSONRequestExecution extends NamedRequest {
       })
       (withOwner /: obj.get("filters"))({
         case (req, JSONArray(list)) =>
-          (req /: list.map(l => new Filter(l.toString)))(_.withFilters(_))
+          val filters = list map {
+            case filter: String =>
+              new Filter("name").withValues(filter)
+            case JSONObject(filter) =>
+              new Filter(filter("name").toString).withValues(filter("value").toString)
+          }
+          (req /: filters)(_.withFilters(_))
         case (req, filters: String) =>
-          (req /: filters.split(",").map(f => new Filter(f)))(_.withFilters(_))
+          req.withFilters((new Filter("name") /: filters.split(","))(_.withValues(_)))
       })
   }
 

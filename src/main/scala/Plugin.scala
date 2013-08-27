@@ -82,7 +82,7 @@ object Plugin extends sbt.Plugin {
     (aws.requests) {
       (requests) => {
         (state: State) =>
-        (Space ~> (StringBasic <~ Space) ~ (token("*") | (requests.map(a => token(a.name)).reduceLeft(_ | _))))
+        (Space ~> (StringBasic <~ Space) ~ (StringBasic | token("*") | (requests.map(a => token(a.name)).reduceLeft(_ | _))))
       }
     }
 
@@ -134,9 +134,9 @@ object Plugin extends sbt.Plugin {
 
   def createRequest(group: String, requests: Seq[NamedRequest])(body: ImageRequest => Unit) = group match {
     case "*" => requests.map(_.execute(new ImageRequest())).foreach(body)
-    case input =>requests
+    case input => requests
       .find(_.name == group)
-      .orElse(Some(NamedAwsRequest("", (_.withFilters(new Filter(group))))))
+      .orElse(Some(NamedAwsRequest("", (_.withFilters(new Filter("name", List(group)))))))
       .map(_.execute(new ImageRequest()))
       .foreach(body)
   }
