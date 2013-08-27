@@ -30,7 +30,11 @@ import util.parsing.json.{
   JSONType
 }
 
+import com.decodified.scalassh.SSH
+import com.decodified.scalassh.SshClient
 import com.decodified.scalassh.HostConfigProvider
+import com.decodified.scalassh.HostFileConfig
+
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
@@ -40,6 +44,7 @@ object Plugin extends sbt.Plugin {
   type ConfiguredRun = Image => RunInstancesRequest
   type InstanceFormat = Reservation => JSONType
 
+  case class NamedSSHScript(name: String, execute: SshClient => Unit) extends NamedExecution[SshClient,Unit]
   case class NamedAwsAction(name: String, execute: String => Unit) extends NamedExecution[String,Unit]
   case class NamedAwsRequest(name: String, execute: ImageRequest => ImageRequest) extends NamedRequest
   case class JSONAwsFileRequest(name: String) extends JSONRequestExecution {
@@ -75,6 +80,8 @@ object Plugin extends sbt.Plugin {
 
     object ssh {
       lazy val config = SettingKey[HostConfigProvider]("aws-ssh-config", "The configure an SSH client")
+      lazy val scripts = SettingKey[Seq[NamedSSHScript]]("aws-ssh-scripts", "Some post run execution scripts")
+      lazy val run = InputKey[Unit]("aws-ssh-run", "Execute some ssh script on a AWS instance group")
     }
   }
 
@@ -90,6 +97,31 @@ object Plugin extends sbt.Plugin {
     (parsed, aws.actions) map {
       case ((name, input), actions) =>
         actions.find(_.name == name).foreach(_.execute(input))
+    }
+  }
+
+  private val sshActionParser: Project.Initialize[State => Parser[(String,String)]] =
+    (aws.ssh.scripts, aws.requests) {
+      (scripts, requests) => {
+        (state: State) =>
+        (Space ~> (scripts.map(s => token(s.name)).reduceLeft(_ | _) <~ Space) ~ (requests.map(r => token(r.name)).reduceLeft(_|_)))
+      }
+    }
+
+  private val executeSshScript = (parsed: TaskKey[(String,String)]) => {
+    (parsed, aws.ssh.config, aws.ssh.scripts, aws.mongo.collection, streams) map {
+      case ((script, group), config, scripts, collection, s) =>
+      import SSH.Result._
+      scripts.find(_.name == script).foreach {
+        script =>
+        collection.filter(_.as[String]("group") == group).foreach {
+          instance =>
+          SSH(instance.as[String]("publicDns"), config)(s => script.execute(s)) match {
+            case Left(msg) => s.log.error(msg)
+            case Right(_) => s.log.success("Finished executing %s on instance %s" format (script, instance("instanceId")))
+          }
+        }
+      }
     }
   }
 
@@ -142,14 +174,14 @@ object Plugin extends sbt.Plugin {
       .foreach(body)
   }
 
-  def mongoSettings: Seq[Setting[_]] = Seq(
+  def awsMongoSettings: Seq[Setting[_]] = Seq(
     aws.mongo.client := MongoClient(),
     aws.mongo.db := "sbt-aws-environment",
     aws.mongo.collectionName <<= (name)(_.replace("-", "") + "instances"),
     aws.mongo.collection <<= (aws.mongo.client, aws.mongo.db, aws.mongo.collectionName)(_(_)(_))
   )
 
-  def awsSettings: Seq[Setting[_]] = mongoSettings ++ Seq(
+  def awsSettings: Seq[Setting[_]] = awsMongoSettings ++ Seq(
     aws.credentials <<= (aws.key, aws.secret) (new BasicAWSCredentials(_, _)),
     aws.client <<= aws.credentials (new AmazonEC2Client(_)),
 
@@ -181,7 +213,7 @@ object Plugin extends sbt.Plugin {
     },
 
     aws.finished <<= (streams) map {
-      s => instanceId => s.log.info("Instance with id %s is now running" format instanceId)
+      s => instanceId => println("Instance with id %s is now running" format instanceId)
     },
 
     aws.requests := Seq(JSONAwsFileRequest("local")),
@@ -274,5 +306,11 @@ object Plugin extends sbt.Plugin {
     },
 
     aws.run <<= InputTask(actionParser)(runActionTask)
+  )
+
+  def awsSshSettings = Seq(
+    aws.ssh.config := HostFileConfig(),
+    aws.ssh.scripts := Seq(),
+    aws.ssh.run <<= InputTask(sshActionParser)(executeSshScript)
   )
 }
