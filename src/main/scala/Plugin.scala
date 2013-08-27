@@ -40,7 +40,7 @@ object Plugin extends sbt.Plugin {
   type ConfiguredRun = Image => RunInstancesRequest
   type InstanceFormat = Reservation => JSONType
 
-  case class NamedAwsAction(name: String, execute: Option[String] => Unit) extends NamedExecution[Option[String],Unit]
+  case class NamedAwsAction(name: String, execute: String => Unit) extends NamedExecution[String,Unit]
   case class NamedAwsRequest(name: String, execute: ImageRequest => ImageRequest) extends NamedRequest
   case class JSONAwsFileRequest(name: String) extends JSONRequestExecution {
     def source = IO.read(file(name + ".json"))
@@ -78,15 +78,15 @@ object Plugin extends sbt.Plugin {
     }
   }
 
-  private val actionParser: Project.Initialize[State => Parser[(String,Option[String])]] =
+  private val actionParser: Project.Initialize[State => Parser[(String,String)]] =
     (aws.requests) {
       (requests) => {
         (state: State) =>
-        (Space ~> (StringBasic <~ Space) ~ complete.DefaultParsers.some(requests.map(a => token(a.name)).reduceLeft(_ | _)))
+        (Space ~> (StringBasic <~ Space) ~ (token("*") | (requests.map(a => token(a.name)).reduceLeft(_ | _))))
       }
     }
 
-  private val runActionTask = (parsed: TaskKey[(String,Option[String])]) => {
+  private val runActionTask = (parsed: TaskKey[(String,String)]) => {
     (parsed, aws.actions) map {
       case ((name, input), actions) =>
         actions.find(_.name == name).foreach(_.execute(input))
@@ -98,7 +98,7 @@ object Plugin extends sbt.Plugin {
     collection: MongoCollection,
     image: Image,
     configure: ConfiguredRun,
-    input: Option[String]
+    input: String
   ) = {
     client
       .runInstances(configure(image))
@@ -114,23 +114,31 @@ object Plugin extends sbt.Plugin {
             ),
             "type" -> instance.getInstanceType(),
             "platform" -> instance.getPlatform(),
-            "status" -> instance.getState.getName(),
-            "publicDns" -> instance.getPublicDnsName(),
-            "group" -> input.getOrElse("default")
+            "state" -> instance.getState.getName(),
+            "group" -> input
           )
         )
       }
   }
 
-  def groupRequest(group: Option[String], collection: MongoCollection, fields: (String, Any)*) = {
+  def groupRequest(group: String, collection: MongoCollection, fields: (String, Any)*) = {
     val query = ((obj: DBObject) =>
-      (fields :+ ("group" -> group.getOrElse("default"))).forall {
+      (fields :+ ("group" -> group)).forall {
         case (k, v) => obj(k) == v
       }
     )
     (new DescribeInstancesRequest() /: collection.filter(query))(
       (r, o) => r.withInstanceIds(o.as[String]("instanceId"))
     )
+  }
+
+  def createRequest(group: String, requests: Seq[NamedRequest])(body: ImageRequest => Unit) = group match {
+    case "*" => requests.map(_.execute(new ImageRequest())).foreach(body)
+    case input =>requests
+      .find(_.name == group)
+      .orElse(Some(NamedAwsRequest("", (_.withFilters(new Filter(group))))))
+      .map(_.execute(new ImageRequest()))
+      .foreach(body)
   }
 
   def mongoSettings: Seq[Setting[_]] = Seq(
@@ -189,16 +197,15 @@ object Plugin extends sbt.Plugin {
       streams
     ) map {
       (client, collection, requests, configure, jsonFormat, instanceFormat, created, finished, s) => Seq(
+        // Tests a given request input
+        NamedAwsAction("test", (input => createRequest(input, requests) {
+          request =>
+          s.log.info("Dry running request group %s" format input)
+          client.describeImages(request).getImages.foreach(println)
+        })),
         // Creates an environment
-        NamedAwsAction("create", { input =>
-          val request = input.map {
-            in =>
-              requests
-              .find(_.name == in)
-              .orElse(Some(NamedAwsRequest("", (_.withFilters(new Filter(in))))))
-              .map(_.execute(new ImageRequest()))
-              .get
-          }.getOrElse(throw new Exception("aws-run create expects some input"))
+        NamedAwsAction("create", (input => createRequest(input, requests) {
+          request =>
           client.describeImages(request).getImages().foreach {
             image =>
             createInstance(client, collection, image, configure, input) foreach {
@@ -206,7 +213,8 @@ object Plugin extends sbt.Plugin {
               created(result.getField("instanceId").toString)
             }
           }
-        }),
+        })),
+        // Triggers on hot instances
         NamedAwsAction("alert", { input =>
           def describeRequest = groupRequest(input, collection, "state" -> "pending")
           val scheduler = Executors.newSingleThreadScheduledExecutor()
@@ -232,10 +240,11 @@ object Plugin extends sbt.Plugin {
               if (describeRequest.getInstanceIds().isEmpty) {
                 scheduler.shutdownNow()
               } else {
-                s.log.info("Checking group %s in 10 seconds" format input.getOrElse("default"))
+                s.log.info("Checking group %s in 10 seconds" format input)
               }
             }
           }
+          s.log.info("Polling group %s for running state" format input)
           scheduler.scheduleAtFixedRate(callback, 0L, 10L, TimeUnit.SECONDS)
         }),
         // Checks on the environment status
@@ -246,7 +255,7 @@ object Plugin extends sbt.Plugin {
         }),
         // Terminates the local environment
         NamedAwsAction("terminate", { input =>
-          val filter = ((obj: DBObject) => obj.as[String]("group") == input.getOrElse("default"))
+          val filter = ((obj: DBObject) => obj.as[String]("group") == input)
           val request = new TerminateInstancesRequest(collection.filter(filter).map(_.as[String]("instanceId")).toList)
           client.terminateInstances(request).getTerminatingInstances().foreach { instance =>
             s.log.success("%s: %s => %s" format (
@@ -255,7 +264,7 @@ object Plugin extends sbt.Plugin {
               instance.getCurrentState().getName()
             ))
           }
-          s.log.info("Clearing local instance collection group %s" format input.getOrElse("default"))
+          s.log.info("Clearing local instance collection group %s" format input)
           collection.drop()
         })
       )
