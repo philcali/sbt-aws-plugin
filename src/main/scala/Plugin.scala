@@ -217,7 +217,7 @@ object Plugin extends sbt.Plugin {
       s => instanceId => s.log.info("Instance with id %s is now running" format instanceId)
     },
 
-    aws.requests <+= (baseDirectory)(base => JSONAwsFileRequest("local", base / "aws-request")),
+    aws.requests <<= (baseDirectory)(base => Seq(JSONAwsFileRequest("local", base / "aws-request"))),
 
     aws.actions <<= (
       aws.client,
@@ -315,6 +315,7 @@ object Plugin extends sbt.Plugin {
 
   def awsSshSettings = Seq(
     aws.ssh.config := HostFileConfig(),
+    aws.ssh.scripts := Seq(),
     aws.ssh.run <<= InputTask(sshActionParser)(executeSshScript)
   )
 }
