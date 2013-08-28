@@ -44,8 +44,8 @@ object Plugin extends sbt.Plugin {
   type ConfiguredRun = Image => RunInstancesRequest
   type InstanceFormat = Reservation => JSONType
 
-  case class NamedSSHScript(name: String, execute: SshClient => Unit) extends NamedExecution[SshClient,Unit]
-  case class NamedAwsAction(name: String, execute: String => Unit) extends NamedExecution[String,Unit]
+  case class NamedSSHScript(name: String, description: String, execute: SshClient => Unit) extends NamedExecution[SshClient,Unit]
+  case class NamedAwsAction(name: String, description: String, execute: String => Unit) extends NamedExecution[String,Unit]
   case class NamedAwsRequest(name: String, execute: ImageRequest => ImageRequest) extends NamedRequest
   case class JSONAwsFileRequest(name: String, base: File) extends JSONRequestExecution {
     def source = IO.read(base / (name + ".json"))
@@ -84,13 +84,64 @@ object Plugin extends sbt.Plugin {
       lazy val scripts = SettingKey[Seq[NamedSSHScript]]("aws-ssh-scripts", "Some post run execution scripts")
       lazy val run = InputKey[Unit]("aws-ssh-run", "Execute some ssh script on a AWS instance group")
     }
+
+    def createInstance(
+      client: AmazonEC2Client,
+      collection: MongoCollection,
+      image: Image,
+      configure: ConfiguredRun,
+      input: String
+    ) = {
+      client
+        .runInstances(configure(image))
+        .getReservation()
+        .getInstances() map { instance =>
+          val dbObj = MongoDBObject("instanceId" -> instance.getInstanceId())
+          collection += collection.findOne(dbObj).getOrElse(
+            dbObj ++ (
+              "ownerId" -> image.getOwnerId(),
+              "image" -> Map(
+                "id" -> instance.getImageId(),
+                "name" -> image.getName()
+              ),
+              "type" -> instance.getInstanceType(),
+              "platform" -> instance.getPlatform(),
+              "state" -> instance.getState.getName(),
+              "group" -> input
+            )
+          )
+          dbObj
+        }
+    }
+
+    def groupRequest(group: String, collection: MongoCollection, fields: (String, Any)*) = {
+      val query = (MongoDBObject("group" -> group) /: fields)(_ + _)
+      (new DescribeInstancesRequest() /: collection.find(query))(
+        (r, o) => r.withInstanceIds(o.as[String]("instanceId"))
+      )
+    }
+
+    def defaultRunRequest(image: Image, instanceType: String = "t1.micro") = {
+      new RunInstancesRequest()
+        .withImageId(image.getImageId())
+        .withInstanceType(instanceType)
+    }
+
+    def createRequest(group: String, requests: Seq[NamedRequest])(body: ImageRequest => Unit) = group match {
+      case "*" => requests.map(_.execute(new ImageRequest())).foreach(body)
+      case input => requests
+        .find(_.name == group)
+        .orElse(Some(NamedAwsRequest("", (_.withFilters(new Filter("name", List(group)))))))
+        .map(_.execute(new ImageRequest()))
+        .foreach(body)
+    }
   }
 
   private val actionParser: Project.Initialize[State => Parser[(String,String)]] =
     (aws.requests) {
       (requests) => {
         (state: State) =>
-        (Space ~> (StringBasic <~ Space) ~ (StringBasic | token("*") | (requests.map(a => token(a.name)).reduceLeft(_ | _))))
+        (Space ~> (StringBasic <~ Space) ~ (token("*") | (requests.map(a => token(a.name)).reduceLeft(_ | _))))
       }
     }
 
@@ -126,57 +177,6 @@ object Plugin extends sbt.Plugin {
     }
   }
 
-  def createInstance(
-    client: AmazonEC2Client,
-    collection: MongoCollection,
-    image: Image,
-    configure: ConfiguredRun,
-    input: String
-  ) = {
-    client
-      .runInstances(configure(image))
-      .getReservation()
-      .getInstances() map { instance =>
-        val dbObj = MongoDBObject("instanceId" -> instance.getInstanceId())
-        collection += collection.findOne(dbObj).getOrElse(
-          dbObj ++ (
-            "ownerId" -> image.getOwnerId(),
-            "image" -> Map(
-              "id" -> instance.getImageId(),
-              "name" -> image.getName()
-            ),
-            "type" -> instance.getInstanceType(),
-            "platform" -> instance.getPlatform(),
-            "state" -> instance.getState.getName(),
-            "group" -> input
-          )
-        )
-        dbObj
-      }
-  }
-
-  def groupRequest(group: String, collection: MongoCollection, fields: (String, Any)*) = {
-    val query = (MongoDBObject("group" -> group) /: fields)(_ + _)
-    (new DescribeInstancesRequest() /: collection.find(query))(
-      (r, o) => r.withInstanceIds(o.as[String]("instanceId"))
-    )
-  }
-
-  def defaultRunRequest(image: Image, instanceType: String = "t1.micro") = {
-    new RunInstancesRequest()
-      .withImageId(image.getImageId())
-      .withInstanceType(instanceType)
-  }
-
-  def createRequest(group: String, requests: Seq[NamedRequest])(body: ImageRequest => Unit) = group match {
-    case "*" => requests.map(_.execute(new ImageRequest())).foreach(body)
-    case input => requests
-      .find(_.name == group)
-      .orElse(Some(NamedAwsRequest("", (_.withFilters(new Filter("name", List(group)))))))
-      .map(_.execute(new ImageRequest()))
-      .foreach(body)
-  }
-
   def awsMongoSettings: Seq[Setting[_]] = Seq(
     aws.mongo.client := MongoClient(),
     aws.mongo.db := "sbt-aws-environment",
@@ -203,7 +203,7 @@ object Plugin extends sbt.Plugin {
     }),
 
     aws.configuredInstance := (image =>
-      defaultRunRequest(image)
+      aws.defaultRunRequest(image)
         .withMinCount(1)
         .withMaxCount(1)
         .withSecurityGroups("default")
@@ -231,26 +231,23 @@ object Plugin extends sbt.Plugin {
       streams
     ) map {
       (client, collection, requests, configure, jsonFormat, instanceFormat, created, finished, s) => Seq(
-        // Tests a given request input
-        NamedAwsAction("test", (input => createRequest(input, requests) {
+        NamedAwsAction("test", "Tests a given request input", (input => aws.createRequest(input, requests) {
           request =>
           s.log.info("Dry running request group %s" format input)
           client.describeImages(request).getImages.foreach(println)
         })),
-        // Creates an environment
-        NamedAwsAction("create", (input => createRequest(input, requests) {
+        NamedAwsAction("create", "Creates an evironment", (input => aws.createRequest(input, requests) {
           request =>
           client.describeImages(request).getImages().foreach {
             image =>
-            createInstance(client, collection, image, configure, input) foreach {
+            aws.createInstance(client, collection, image, configure, input) foreach {
               result =>
               created(result.as[String]("instanceId"))
             }
           }
         })),
-        // Triggers on hot instances
-        NamedAwsAction("alert", { input =>
-          def describeRequest = groupRequest(input, collection, "state" -> "pending")
+        NamedAwsAction("alert", "Triggers on hot instances", { input =>
+          def describeRequest = aws.groupRequest(input, collection, "state" -> "pending")
           val scheduler = Executors.newSingleThreadScheduledExecutor()
           val callback = new Runnable {
             def run() {
@@ -283,14 +280,12 @@ object Plugin extends sbt.Plugin {
           s.log.info("Polling group %s for running state" format input)
           scheduler.scheduleAtFixedRate(callback, 0L, 10L, TimeUnit.SECONDS)
         }),
-        // Checks on the environment status
-        NamedAwsAction("status", { input =>
-          val request = groupRequest(input, collection)
+        NamedAwsAction("status", "Checks on the environment status", { input =>
+          val request = aws.groupRequest(input, collection)
           val formats = client.describeInstances(request).getReservations().map(instanceFormat)
           s.log.info(JSONArray(formats.toList).toString(jsonFormat))
         }),
-        // Terminates the local environment
-        NamedAwsAction("terminate", { input =>
+        NamedAwsAction("terminate", "Terminates the environment", { input =>
           val filter = MongoDBObject("group" -> input)
           val request = new TerminateInstancesRequest(collection.find(filter).map(_.as[String]("instanceId")).toList)
           client.terminateInstances(request).getTerminatingInstances().foreach { instance =>
@@ -307,7 +302,9 @@ object Plugin extends sbt.Plugin {
     },
 
     aws.listActions <<= (aws.actions, streams) map {
-      (actions, s) => actions.foreach(action => s.log.info(action.name))
+      (actions, s) => actions.foreach {
+        action => s.log.info("%s - %s" format (action.name, action.description))
+      }
     },
 
     aws.run <<= InputTask(actionParser)(runActionTask)
