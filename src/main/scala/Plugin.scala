@@ -47,8 +47,8 @@ object Plugin extends sbt.Plugin {
   case class NamedSSHScript(name: String, execute: SshClient => Unit) extends NamedExecution[SshClient,Unit]
   case class NamedAwsAction(name: String, execute: String => Unit) extends NamedExecution[String,Unit]
   case class NamedAwsRequest(name: String, execute: ImageRequest => ImageRequest) extends NamedRequest
-  case class JSONAwsFileRequest(name: String) extends JSONRequestExecution {
-    def source = IO.read(file(name + ".json"))
+  case class JSONAwsFileRequest(name: String, base: File) extends JSONRequestExecution {
+    def source = IO.read(base / (name + ".json"))
   }
 
   object aws {
@@ -66,6 +66,7 @@ object Plugin extends sbt.Plugin {
     lazy val created = TaskKey[InstanceCallback]("aws-created")
     lazy val finished = TaskKey[InstanceCallback]("aws-finished")
     lazy val actions = TaskKey[Seq[NamedAwsAction]]("aws-actions")
+    lazy val listActions = TaskKey[Unit]("aws-list-actions")
     lazy val run = InputKey[Unit]("aws-run", "Run a configured AWS action")
 
     object mongo {
@@ -118,7 +119,7 @@ object Plugin extends sbt.Plugin {
           instance =>
           SSH(instance.as[String]("publicDns"), config)(s => script.execute(s)) match {
             case Left(msg) => s.log.error(msg)
-            case Right(_) => s.log.success("Finished executing %s on instance %s" format (script, instance("instanceId")))
+            case Right(_) => s.log.success("Finished executing %s on instance %s" format (script.name, instance("instanceId")))
           }
         }
       }
@@ -155,14 +156,16 @@ object Plugin extends sbt.Plugin {
   }
 
   def groupRequest(group: String, collection: MongoCollection, fields: (String, Any)*) = {
-    val query = ((obj: DBObject) =>
-      (fields :+ ("group" -> group)).forall {
-        case (k, v) => obj(k) == v
-      }
-    )
-    (new DescribeInstancesRequest() /: collection.filter(query))(
+    val query = (MongoDBObject("group" -> group) /: fields)(_ + _)
+    (new DescribeInstancesRequest() /: collection.find(query))(
       (r, o) => r.withInstanceIds(o.as[String]("instanceId"))
     )
+  }
+
+  def defaultRunRequest(image: Image, instanceType: String = "t1.micro") = {
+    new RunInstancesRequest()
+      .withImageId(image.getImageId())
+      .withInstanceType(instanceType)
   }
 
   def createRequest(group: String, requests: Seq[NamedRequest])(body: ImageRequest => Unit) = group match {
@@ -200,11 +203,9 @@ object Plugin extends sbt.Plugin {
     }),
 
     aws.configuredInstance := (image =>
-      new RunInstancesRequest()
-        .withImageId(image.getImageId)
-        .withMaxCount(1)
+      defaultRunRequest(image)
         .withMinCount(1)
-        .withInstanceType("t1.micro")
+        .withMaxCount(1)
         .withSecurityGroups("default")
     ),
 
@@ -213,10 +214,10 @@ object Plugin extends sbt.Plugin {
     },
 
     aws.finished <<= (streams) map {
-      s => instanceId => println("Instance with id %s is now running" format instanceId)
+      s => instanceId => s.log.info("Instance with id %s is now running" format instanceId)
     },
 
-    aws.requests := Seq(JSONAwsFileRequest("local")),
+    aws.requests <+= (baseDirectory)(base => JSONAwsFileRequest("local", base / "aws-request")),
 
     aws.actions <<= (
       aws.client,
@@ -290,8 +291,8 @@ object Plugin extends sbt.Plugin {
         }),
         // Terminates the local environment
         NamedAwsAction("terminate", { input =>
-          val filter = ((obj: DBObject) => obj.as[String]("group") == input)
-          val request = new TerminateInstancesRequest(collection.filter(filter).map(_.as[String]("instanceId")).toList)
+          val filter = MongoDBObject("group" -> input)
+          val request = new TerminateInstancesRequest(collection.find(filter).map(_.as[String]("instanceId")).toList)
           client.terminateInstances(request).getTerminatingInstances().foreach { instance =>
             s.log.success("%s: %s => %s" format (
               instance.getInstanceId(),
@@ -305,12 +306,15 @@ object Plugin extends sbt.Plugin {
       )
     },
 
+    aws.listActions <<= (aws.actions, streams) map {
+      (actions, s) => actions.foreach(action => s.log.info(action.name))
+    },
+
     aws.run <<= InputTask(actionParser)(runActionTask)
   )
 
   def awsSshSettings = Seq(
     aws.ssh.config := HostFileConfig(),
-    aws.ssh.scripts := Seq(),
     aws.ssh.run <<= InputTask(sshActionParser)(executeSshScript)
   )
 }
