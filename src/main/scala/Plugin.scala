@@ -44,8 +44,8 @@ object Plugin extends sbt.Plugin {
   type ConfiguredRun = Image => RunInstancesRequest
   type InstanceFormat = Reservation => JSONType
 
-  case class NamedSSHScript(name: String, description: String, execute: SshClient => Unit) extends NamedExecution[SshClient,Unit]
-  case class NamedAwsAction(name: String, description: String, execute: String => Unit) extends NamedExecution[String,Unit]
+  case class NamedSSHScript(name: String, description: String = "", execute: SshClient => Unit) extends NamedExecution[SshClient,Unit]
+  case class NamedAwsAction(name: String, description: String = "", execute: String => Unit) extends NamedExecution[String,Unit]
   case class NamedAwsRequest(name: String, execute: ImageRequest => ImageRequest) extends NamedRequest
   case class JSONAwsFileRequest(name: String, base: File) extends JSONRequestExecution {
     def source = IO.read(base / (name + ".json"))
@@ -166,7 +166,7 @@ object Plugin extends sbt.Plugin {
       import SSH.Result._
       scripts.find(_.name == script).foreach {
         script =>
-        collection.filter(_.as[String]("group") == group).foreach {
+        collection.find(MongoDBObject("group" -> group)).foreach {
           instance =>
           SSH(instance.as[String]("publicDns"), config)(s => script.execute(s)) match {
             case Left(msg) => s.log.error(msg)
