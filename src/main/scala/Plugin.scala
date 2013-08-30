@@ -51,7 +51,7 @@ object Plugin extends sbt.Plugin {
     def source = IO.read(base / (name + ".json"))
   }
 
-  object aws {
+  object Aws {
     lazy val key = SettingKey[String]("aws-key", "The AWS key")
     lazy val secret = SettingKey[String]("aws-secret", "The AWS secret")
     lazy val credentials = SettingKey[AWSCredentials]("aws-credentials", "The AWS credentials")
@@ -69,7 +69,7 @@ object Plugin extends sbt.Plugin {
     lazy val listActions = TaskKey[Unit]("aws-list-actions")
     lazy val run = InputKey[Unit]("aws-run", "Run a configured AWS action")
 
-    object mongo {
+    object Mongo {
       lazy val url = SettingKey[MongoClientURI]("aws-mongo-uri", "Configured Mongo client URI")
       lazy val addresses = SettingKey[List[ServerAddress]]("aws-mongo-addresses", "Mongo connection Server Addresses")
 
@@ -79,7 +79,7 @@ object Plugin extends sbt.Plugin {
       lazy val collection = SettingKey[MongoCollection]("aws-mongo-collection")
     }
 
-    object ssh {
+    object Ssh {
       lazy val config = SettingKey[HostConfigProvider]("aws-ssh-config", "The configure an SSH client")
       lazy val scripts = SettingKey[Seq[NamedSSHScript]]("aws-ssh-scripts", "Some post run execution scripts")
       lazy val run = InputKey[Unit]("aws-ssh-run", "Execute some ssh script on a AWS instance group")
@@ -137,59 +137,33 @@ object Plugin extends sbt.Plugin {
     }
   }
 
-  private val actionParser: Project.Initialize[State => Parser[(String,String)]] =
-    (aws.requests) {
-      (requests) => {
-        (state: State) =>
-        (Space ~> (StringBasic <~ Space) ~ (token("*") | (requests.map(a => token(a.name)).reduceLeft(_ | _))))
-      }
-    }
-
-  private val runActionTask = (parsed: TaskKey[(String,String)]) => {
-    (parsed, aws.actions) map {
-      case ((name, input), actions) =>
-        actions.find(_.name == name).foreach(_.execute(input))
-    }
+  val actionParser: Def.Initialize[State => Parser[(String,String)]] =
+    Def.setting {
+      (state: State) =>
+      (Space ~> (StringBasic.examples("#action") <~ Space) ~
+      (token("*") | (Aws.requests.value.map(a => token(a.name)).reduceLeft(_ | _))))
   }
 
-  private val sshActionParser: Project.Initialize[State => Parser[(String,String)]] =
-    (aws.ssh.scripts, aws.requests) {
-      (scripts, requests) => {
-        (state: State) =>
-        (Space ~> (scripts.map(s => token(s.name)).reduceLeft(_ | _) <~ Space) ~ (requests.map(r => token(r.name)).reduceLeft(_|_)))
-      }
+  val sshActionParser: Def.Initialize[State => Parser[(String,String)]] =
+    Def.setting {
+      (state: State) =>
+      (Space ~> (Aws.Ssh.scripts.value.map(s => token(s.name)).reduceLeft(_ | _) <~ Space) ~
+      (Aws.requests.value.map(r => token(r.name)).reduceLeft(_|_)))
     }
 
-  private val executeSshScript = (parsed: TaskKey[(String,String)]) => {
-    (parsed, aws.ssh.config, aws.ssh.scripts, aws.mongo.collection, streams) map {
-      case ((script, group), config, scripts, collection, s) =>
-      import SSH.Result._
-      scripts.find(_.name == script).foreach {
-        script =>
-        collection.find(MongoDBObject("group" -> group)).foreach {
-          instance =>
-          SSH(instance.as[String]("publicDns"), config)(s => script.execute(s)) match {
-            case Left(msg) => s.log.error(msg)
-            case Right(_) => s.log.success("Finished executing %s on instance %s" format (script.name, instance("instanceId")))
-          }
-        }
-      }
-    }
-  }
-
-  def awsMongoSettings: Seq[Setting[_]] = Seq(
-    aws.mongo.client := MongoClient(),
-    aws.mongo.db := "sbt-aws-environment",
-    aws.mongo.collectionName <<= (name)(_.replace("-", "") + "instances"),
-    aws.mongo.collection <<= (aws.mongo.client, aws.mongo.db, aws.mongo.collectionName)(_(_)(_))
+  lazy val awsMongoSettings: Seq[Setting[_]] = Seq(
+    Aws.Mongo.client := MongoClient(),
+    Aws.Mongo.db := "sbt-aws-environment",
+    Aws.Mongo.collectionName := name.value.replace("-", "") + "instances",
+    Aws.Mongo.collection := Aws.Mongo.client.value(Aws.Mongo.db.value)(Aws.Mongo.collectionName.value)
   )
 
-  def awsSettings: Seq[Setting[_]] = awsMongoSettings ++ Seq(
-    aws.credentials <<= (aws.key, aws.secret) (new BasicAWSCredentials(_, _)),
-    aws.client <<= aws.credentials (new AmazonEC2Client(_)),
+  lazy val awsSettings: Seq[Setting[_]] = awsMongoSettings ++ Seq(
+    Aws.credentials := new BasicAWSCredentials(Aws.key.value, Aws.secret.value),
+    Aws.client := new AmazonEC2Client(Aws.credentials.value),
 
-    aws.jsonFormat := JSONFormat.defaultFormatter,
-    aws.instanceFormat := (reservation => {
+    Aws.jsonFormat := JSONFormat.defaultFormatter,
+    Aws.instanceFormat := (reservation => {
       JSONArray(reservation.getInstances().map { instance =>
         JSONObject(Map(
           "instance-id" -> instance.getInstanceId(),
@@ -202,117 +176,131 @@ object Plugin extends sbt.Plugin {
       }.toList)
     }),
 
-    aws.configuredInstance := (image =>
-      aws.defaultRunRequest(image)
+    Aws.configuredInstance := (image =>
+      Aws.defaultRunRequest(image)
         .withMinCount(1)
         .withMaxCount(1)
         .withSecurityGroups("default")
     ),
 
-    aws.created <<= (streams) map {
-      s => instanceId => s.log.info("Instance with id %s was created" format instanceId)
+    Aws.created := {
+      instanceId =>
+        streams.value.log.info(s"Instance with id $instanceId was created.")
     },
 
-    aws.finished <<= (streams) map {
-      s => instanceId => s.log.info("Instance with id %s is now running" format instanceId)
+    Aws.finished := {
+      instanceId =>
+        streams.value.log.info(s"Instance with id $instanceId is now running.")
     },
 
-    aws.requests <<= (baseDirectory)(base => Seq(JSONAwsFileRequest("local", base / "aws-request"))),
+    Aws.requests := Seq(JSONAwsFileRequest("local", baseDirectory.value / "aws-request")),
 
-    aws.actions <<= (
-      aws.client,
-      aws.mongo.collection,
-      aws.requests,
-      aws.configuredInstance,
-      aws.jsonFormat,
-      aws.instanceFormat,
-      aws.created,
-      aws.finished,
-      streams
-    ) map {
-      (client, collection, requests, configure, jsonFormat, instanceFormat, created, finished, s) => Seq(
-        NamedAwsAction("test", "Tests a given request input", (input => aws.createRequest(input, requests) {
-          request =>
-          s.log.info("Dry running request group %s" format input)
-          client.describeImages(request).getImages.foreach(println)
-        })),
-        NamedAwsAction("create", "Creates an evironment", (input => aws.createRequest(input, requests) {
-          request =>
-          client.describeImages(request).getImages().foreach {
-            image =>
-            aws.createInstance(client, collection, image, configure, input) foreach {
-              result =>
-              created(result.as[String]("instanceId"))
-            }
+    Aws.actions := { Seq(
+      NamedAwsAction("test", "Tests a given request input", (input => Aws.createRequest(input, Aws.requests.value) {
+        request =>
+        streams.value.log.info(s"Dry running request group ${input}")
+        Aws.client.value.describeImages(request).getImages.foreach(println)
+      })),
+      NamedAwsAction("create", "Creates an evironment", (input => Aws.createRequest(input, Aws.requests.value) {
+        request =>
+        Aws.client.value.describeImages(request).getImages().foreach {
+          image =>
+          Aws.createInstance(
+            Aws.client.value,
+            Aws.Mongo.collection.value,
+            image,
+            Aws.configuredInstance.value,
+            input) foreach {
+            result =>
+            Aws.created.value(result.as[String]("instanceId"))
           }
-        })),
-        NamedAwsAction("alert", "Triggers on hot instances", { input =>
-          def describeRequest = aws.groupRequest(input, collection, "state" -> "pending")
-          val scheduler = Executors.newSingleThreadScheduledExecutor()
-          val callback = new Runnable {
-            def run() {
-              client.describeInstances(describeRequest).getReservations() foreach {
-                reservation =>
-                reservation.getInstances() foreach {
-                  instance =>
-                  val obj = MongoDBObject("instanceId" -> instance.getInstanceId())
-                  collection
-                    .findOne(obj)
-                    .filter(_.as[String]("state") != instance.getState().getName())
-                    .foreach {
-                      o =>
-                      collection += o ++ (
-                        "state" -> instance.getState().getName(),
-                        "publicDns" -> instance.getPublicDnsName()
-                      )
-                      finished(instance.getInstanceId())
-                    }
-                }
-              }
-              if (describeRequest.getInstanceIds().isEmpty) {
-                s.log.info("Shutting down poller for group %s" format input)
-                scheduler.shutdownNow()
-              } else {
-                s.log.info("Checking group %s in 10 seconds" format input)
+        }
+      })),
+      NamedAwsAction("alert", "Triggers on hot instances", { input =>
+        def describeRequest = Aws.groupRequest(input, Aws.Mongo.collection.value, "state" -> "pending")
+        val scheduler = Executors.newSingleThreadScheduledExecutor()
+        val callback = new Runnable {
+          def run() {
+            Aws.client.value.describeInstances(describeRequest).getReservations() foreach {
+              reservation =>
+              reservation.getInstances() foreach {
+                instance =>
+                val obj = MongoDBObject("instanceId" -> instance.getInstanceId())
+                Aws.Mongo.collection.value
+                  .findOne(obj)
+                  .filter(_.as[String]("state") != instance.getState().getName())
+                  .foreach {
+                    o =>
+                    Aws.Mongo.collection.value += o ++ (
+                      "state" -> instance.getState().getName(),
+                      "publicDns" -> instance.getPublicDnsName()
+                    )
+                    Aws.finished.value(instance.getInstanceId())
+                  }
               }
             }
+            if (describeRequest.getInstanceIds().isEmpty) {
+              streams.value.log.info(s"Shutting down poller for group ${input}")
+              scheduler.shutdownNow()
+            } else {
+              streams.value.log.info(s"Checking group ${input} in 10 seconds")
+            }
           }
-          s.log.info("Polling group %s for running state" format input)
-          scheduler.scheduleAtFixedRate(callback, 0L, 10L, TimeUnit.SECONDS)
-        }),
-        NamedAwsAction("status", "Checks on the environment status", { input =>
-          val request = aws.groupRequest(input, collection)
-          val formats = client.describeInstances(request).getReservations().map(instanceFormat)
-          s.log.info(JSONArray(formats.toList).toString(jsonFormat))
-        }),
-        NamedAwsAction("terminate", "Terminates the environment", { input =>
-          val filter = MongoDBObject("group" -> input)
-          val request = new TerminateInstancesRequest(collection.find(filter).map(_.as[String]("instanceId")).toList)
-          client.terminateInstances(request).getTerminatingInstances().foreach { instance =>
-            s.log.success("%s: %s => %s" format (
-              instance.getInstanceId(),
-              instance.getPreviousState().getName(),
-              instance.getCurrentState().getName()
-            ))
-          }
-          s.log.info("Clearing local instance collection group %s" format input)
-          collection.drop()
-        })
-      )
+        }
+        streams.value.log.info("Polling group ${input} for running state")
+        scheduler.scheduleAtFixedRate(callback, 0L, 10L, TimeUnit.SECONDS)
+      }),
+      NamedAwsAction("status", "Checks on the environment status", { input =>
+        val request = Aws.groupRequest(input, Aws.Mongo.collection.value)
+        val formats = Aws.client.value.describeInstances(request).getReservations().map(Aws.instanceFormat.value)
+        streams.value.log.info(JSONArray(formats.toList).toString(Aws.jsonFormat.value))
+      }),
+      NamedAwsAction("terminate", "Terminates the environment", { input =>
+        val filter = MongoDBObject("group" -> input)
+        val request = new TerminateInstancesRequest(Aws.Mongo.collection.value.find(filter).map(_.as[String]("instanceId")).toList)
+        Aws.client.value.terminateInstances(request).getTerminatingInstances().foreach { instance =>
+          streams.value.log.success("%s: %s => %s" format (
+            instance.getInstanceId(),
+            instance.getPreviousState().getName(),
+            instance.getCurrentState().getName()
+          ))
+        }
+        streams.value.log.info("Clearing local instance collection group %s" format input)
+        Aws.Mongo.collection.value.drop()
+      })
+    ) },
+
+    Aws.listActions := Aws.actions.value.foreach {
+      action =>
+      streams.value.log.info("%s - %s" format (action.name, action.description))
     },
 
-    aws.listActions <<= (aws.actions, streams) map {
-      (actions, s) => actions.foreach {
-        action => s.log.info("%s - %s" format (action.name, action.description))
+    Aws.run := {
+      actionParser.parsed match {
+        case (name, input) =>
+        Aws.actions.value.find(_.name == name).foreach(_.execute(input))
       }
-    },
-
-    aws.run <<= InputTask(actionParser)(runActionTask)
+    }
   )
 
-  def awsSshSettings = Seq(
-    aws.ssh.config := HostFileConfig(),
-    aws.ssh.scripts := Seq(),
-    aws.ssh.run <<= InputTask(sshActionParser)(executeSshScript)
+  lazy val awsSshSettings: Seq[Setting[_]] = Seq(
+    Aws.Ssh.config := HostFileConfig(),
+    Aws.Ssh.scripts := Seq(),
+    Aws.Ssh.run := {
+      import SSH.Result._
+      sshActionParser.parsed match {
+        case (script, group) =>
+        Aws.Ssh.scripts.value.find(_.name == script).foreach {
+          script =>
+          Aws.Mongo.collection.value.find(MongoDBObject("group" -> group)).foreach {
+            instance =>
+            SSH(instance.as[String]("publicDns"), Aws.Ssh.config.value)(s => script.execute(s)) match {
+              case Left(msg) => streams.value.log.error(msg)
+              case Right(_) => streams.value.log.success("Finished executing %s on instance %s" format (script.name, instance("instanceId")))
+            }
+          }
+        }
+      }
+    }
   )
 }
