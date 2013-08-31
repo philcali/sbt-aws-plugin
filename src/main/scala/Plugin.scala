@@ -62,6 +62,7 @@ object Plugin extends sbt.Plugin {
     lazy val jsonFormat = SettingKey[JSONFormat.ValueFormatter]("aws-json-format")
     lazy val instanceFormat = SettingKey[InstanceFormat]("aws-instance-format")
 
+    lazy val pollingInterval = SettingKey[Int]("aws-polling-interval")
     lazy val requestDir = SettingKey[File]("aws-request-dir")
     lazy val requests = SettingKey[Seq[NamedRequest]]("aws-requests")
     lazy val created = TaskKey[InstanceCallback]("aws-created")
@@ -89,14 +90,13 @@ object Plugin extends sbt.Plugin {
         SSH(instance.as[String]("publicDns"), config)(s => body(s))
       }
 
-      def connectRetry(instance: MongoDBObject, config: HostConfigProvider, retry: Int = 5, delay: Int = 10000)(body: SshClient => Either[String,Any]) {
-        connect(instance, config)(body) match {
-          case Right(_) =>
-          case Left(str) if str.startsWith("Could not connect to") && retry >= 1 =>
+      def retry(limit: Int = 5, delay: Int = 10000)(body: => Either[String,Any]) {
+        body.left.foreach {
+          case str if str.contains("java.net.ConnectException") && limit >= 1 =>
           Thread.sleep(delay)
-          connectRetry(instance, config, retry - 1, delay)(body)
-          case Left(_) =>
-          throw new Exception("aws.connectRetry exceeding retry limit")
+          retry(limit - 1, delay)(body)
+          case str =>
+          throw new Exception(s"aws.ssh.retry exceedes retry limit: ${str}")
         }
       }
 
@@ -155,14 +155,14 @@ object Plugin extends sbt.Plugin {
     }
   }
 
-  val actionParser: Def.Initialize[State => Parser[(String,String)]] =
+  private val actionParser: Def.Initialize[State => Parser[(String,String)]] =
     Def.setting {
       (state: State) =>
       (Space ~> (StringBasic.examples("action") <~ Space) ~
       (token("*") | (aws.requests.value.map(a => token(a.name)).reduceLeft(_ | _))))
   }
 
-  val sshActionParser: Def.Initialize[State => Parser[(String,String)]] =
+  private val sshActionParser: Def.Initialize[State => Parser[(String,String)]] =
     Def.setting {
       (state: State) =>
       (Space ~> (aws.ssh.scripts.value.map(s => token(s.name)).reduceLeft(_ | _) <~ Space) ~
@@ -210,6 +210,7 @@ object Plugin extends sbt.Plugin {
       instance => println(s"Instance with id ${instance("instanceId")} is now running.")
     },
 
+    aws.pollingInterval := 10000,
     aws.requestDir := baseDirectory.value / "aws-request",
     aws.requests := Seq(),
 
@@ -260,14 +261,16 @@ object Plugin extends sbt.Plugin {
                       aws.finished.value(aws.mongo.collection.value.findOneByID(o._id).get)
                     } catch {
                       case e: Throwable =>
-                      streams.value.log.warn(s"AWS finish callback failed: ${e.getMessage}")
+                      streams.value.log.warn(s"aws.finished callback failed: ${e.getMessage}")
                     }
                   }
               }
             }
           }
-          streams.value.log.info(s"Polling group ${input} for running state.")
-          Thread.sleep(10000)
+          describeRequest foreach { _ =>
+            streams.value.log.info(s"Polling group ${input} for running state in the next ${aws.pollingInterval.value / 1000} seconds.")
+            Thread.sleep(aws.pollingInterval.value)
+          }
         } while(describeRequest.isDefined)
         streams.value.log.success(s"Group ${input} is hot.")
       }),
@@ -316,9 +319,10 @@ object Plugin extends sbt.Plugin {
           script =>
           aws.mongo.collection.value.find(MongoDBObject("group" -> group)).foreach {
             instance =>
-            aws.ssh.connectScript(instance, aws.ssh.config.value)(script) match {
-              case Left(msg) => streams.value.log.error(msg)
-              case Right(_) => streams.value.log.success("Finished executing %s on instance %s" format (script.name, instance("instanceId")))
+            aws.ssh.retry(delay = aws.pollingInterval.value) {
+              aws.ssh.connectScript(instance, aws.ssh.config.value)(script).right.map {
+                _ => streams.value.log.success(s"Finished executing ${script.name} on instance ${instance("instanceId")}.")
+              }
             }
           }
         }
