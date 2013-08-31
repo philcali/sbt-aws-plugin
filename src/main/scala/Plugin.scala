@@ -225,40 +225,53 @@ object Plugin extends sbt.Plugin {
         }
       })),
       NamedAwsAction("alert", "Triggers on hot instances", { input =>
-        def describeRequest = aws.groupRequest(input, aws.mongo.collection.value, "state" -> "pending")
+        def describeRequest = {
+          val request = aws.groupRequest(input, aws.mongo.collection.value, "state" -> "pending")
+          if (request.getInstanceIds.isEmpty) None else Some(request)
+        }
         val scheduler = Executors.newSingleThreadScheduledExecutor()
         val callback = new Runnable {
           def run() {
-            aws.client.value.describeInstances(describeRequest).getReservations() foreach {
-              reservation =>
-              reservation.getInstances() foreach {
-                instance =>
-                val obj = MongoDBObject("instanceId" -> instance.getInstanceId())
-                aws.mongo.collection.value
-                  .findOne(obj)
-                  .filter(_.as[String]("state") != instance.getState().getName())
-                  .foreach {
-                    o =>
-                    aws.mongo.collection.value += o ++ (
-                      "state" -> instance.getState().getName(),
-                      "publicDns" -> instance.getPublicDnsName()
-                    )
-                    util.Try {
-                      aws.finished.value(aws.mongo.collection.value.findOneByID(o._id).get)
-                    } recover {
-                      case e =>
-                      streams.value.log.warn(s"AWS finish callback failed: ${e.getMessage}")
+            describeRequest.foreach {
+              request =>
+              aws.client.value.describeInstances(request).getReservations() foreach {
+                reservation =>
+                reservation.getInstances() foreach {
+                  instance =>
+                  val obj = MongoDBObject("instanceId" -> instance.getInstanceId())
+                  aws.mongo.collection.value
+                    .findOne(obj)
+                    .filter(_.as[String]("state") != instance.getState().getName())
+                    .foreach {
+                      o =>
+                      aws.mongo.collection.value += o ++ (
+                        "state" -> instance.getState().getName(),
+                        "publicDns" -> instance.getPublicDnsName()
+                      )
+                      // In my experience... just because the machine is "running"
+                      // doesn't mean it's accepting connections
+                      scheduler.schedule(new Runnable {
+                        def run() {
+                          util.Try {
+                            aws.finished.value(aws.mongo.collection.value.findOneByID(o._id).get)
+                          }.recover {
+                            case e =>
+                            streams.value.log.warn(s"AWS finish callback failed: ${e.getMessage}")
+                          }.get
+                        }
+                      }, 20L, TimeUnit.SECONDS)
                     }
-                  }
+                }
               }
             }
 
-            if (describeRequest.getInstanceIds().isEmpty) {
+            describeRequest match {
+              case Some(_) =>
+              streams.value.log.info(s"Checking group ${input} in 10 seconds.")
+              case None =>
               streams.value.log.info(s"Shutting down poller for group ${input}.")
               scheduler.shutdown()
               scheduler.awaitTermination(5L, TimeUnit.MINUTES)
-            } else {
-              streams.value.log.info(s"Checking group ${input} in 10 seconds.")
             }
           }
         }
