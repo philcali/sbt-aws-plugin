@@ -62,6 +62,7 @@ object Plugin extends sbt.Plugin {
     lazy val jsonFormat = SettingKey[JSONFormat.ValueFormatter]("aws-json-format")
     lazy val instanceFormat = SettingKey[InstanceFormat]("aws-instance-format")
 
+    lazy val requestDir = SettingKey[File]("aws-request-dir")
     lazy val requests = SettingKey[Seq[NamedRequest]]("aws-requests")
     lazy val created = TaskKey[InstanceCallback]("aws-created")
     lazy val finished = TaskKey[InstanceCallback]("aws-finished")
@@ -184,16 +185,15 @@ object Plugin extends sbt.Plugin {
     ),
 
     aws.created := {
-      instanceId =>
-        streams.value.log.info(s"Instance with id $instanceId was created.")
+      instanceId => println(s"Instance with id $instanceId was created.")
     },
 
     aws.finished := {
-      instanceId =>
-        streams.value.log.info(s"Instance with id $instanceId is now running.")
+      instanceId => println(s"Instance with id $instanceId is now running.")
     },
 
-    aws.requests := Seq(JSONAwsFileRequest("local", baseDirectory.value / "aws-request")),
+    aws.requestDir := baseDirectory.value / "aws-request",
+    aws.requests := Seq(),
 
     aws.actions := { Seq(
       NamedAwsAction("test", "Tests a given request input", (input => aws.createRequest(input, aws.requests.value) {
@@ -240,14 +240,14 @@ object Plugin extends sbt.Plugin {
               }
             }
             if (describeRequest.getInstanceIds().isEmpty) {
-              streams.value.log.info(s"Shutting down poller for group ${input}")
+              streams.value.log.info(s"Shutting down poller for group ${input}.")
               scheduler.shutdownNow()
             } else {
-              streams.value.log.info(s"Checking group ${input} in 10 seconds")
+              streams.value.log.info(s"Checking group ${input} in 10 seconds.")
             }
           }
         }
-        streams.value.log.info("Polling group ${input} for running state")
+        streams.value.log.info("Polling group ${input} for running state.")
         scheduler.scheduleAtFixedRate(callback, 0L, 10L, TimeUnit.SECONDS)
       }),
       NamedAwsAction("status", "Checks on the environment status", { input =>
