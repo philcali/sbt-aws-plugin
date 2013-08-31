@@ -44,7 +44,7 @@ object Plugin extends sbt.Plugin {
   type ConfiguredRun = (String, Image) => RunInstancesRequest
   type InstanceFormat = Reservation => JSONType
 
-  case class NamedSSHScript(name: String, description: String = "", execute: SshClient => Unit) extends NamedExecution[SshClient,Unit]
+  case class NamedSSHScript(name: String, description: String = "", execute: SshClient => Either[String,Any]) extends NamedExecution[SshClient, Either[String,Any]]
   case class NamedAwsAction(name: String, description: String = "", execute: String => Unit) extends NamedExecution[String,Unit]
   case class NamedAwsRequest(name: String, execute: ImageRequest => ImageRequest) extends NamedRequest
   case class JSONAwsFileRequest(name: String, base: File) extends JSONRequestExecution {
@@ -85,20 +85,18 @@ object Plugin extends sbt.Plugin {
       lazy val scripts = SettingKey[Seq[NamedSSHScript]]("aws-ssh-scripts", "Some post run execution scripts")
       lazy val run = InputKey[Unit]("aws-ssh-run", "Execute some ssh script on a AWS instance group")
 
-      def connect(instance: MongoDBObject, config: HostConfigProvider)(body: SshClient => Unit) = {
-        import SSH.Result._
+      def connect(instance: MongoDBObject, config: HostConfigProvider)(body: SshClient => Either[String,Any]) = {
         SSH(instance.as[String]("publicDns"), config)(s => body(s))
       }
 
-      def connectRetry(instance: MongoDBObject, config: HostConfigProvider, retry: Int = 5, delay: Int = 10000)(body: SshClient => Unit) {
-        if (connect(instance, config)(body).isLeft) {
-          val retryMinusOne = retry - 1
-          if (retryMinusOne > 0) {
-            Thread.sleep(delay)
-            connectRetry(instance, config, retryMinusOne, delay)(body)
-          } else {
-            throw new Exception("aws.connectRetry exceeding retry limit")
-          }
+      def connectRetry(instance: MongoDBObject, config: HostConfigProvider, retry: Int = 5, delay: Int = 10000)(body: SshClient => Either[String,Any]) {
+        connect(instance, config)(body) match {
+          case Right(_) =>
+          case Left(str) if str.startsWith("Could not connect to") && retry >= 1 =>
+          Thread.sleep(delay)
+          connectRetry(instance, config, retry - 1, delay)(body)
+          case Left(_) =>
+          throw new Exception("aws.connectRetry exceeding retry limit")
         }
       }
 
@@ -269,7 +267,7 @@ object Plugin extends sbt.Plugin {
             }
           }
           streams.value.log.info(s"Polling group ${input} for running state.")
-          Thread.sleep(1000)
+          Thread.sleep(10000)
         } while(describeRequest.isDefined)
         streams.value.log.success(s"Group ${input} is hot.")
       }),
