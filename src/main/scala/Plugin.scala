@@ -119,7 +119,7 @@ object Plugin extends sbt.Plugin {
               "group" -> input
             )
           )
-          collection.findOneByID(dbObj._id).get
+          collection.findOne(dbObj).get
         }
     }
 
@@ -243,7 +243,12 @@ object Plugin extends sbt.Plugin {
                       "state" -> instance.getState().getName(),
                       "publicDns" -> instance.getPublicDnsName()
                     )
-                    aws.finished.value(aws.mongo.collection.value.findOneByID(o._id).get)
+                    util.Try {
+                      aws.finished.value(aws.mongo.collection.value.findOneByID(o._id).get)
+                    } recover {
+                      case e =>
+                      streams.value.log.warn(s"AWS finish callback failed: ${e.getMessage}")
+                    }
                   }
               }
             }
@@ -274,7 +279,9 @@ object Plugin extends sbt.Plugin {
           ))
         }
         streams.value.log.info(s"Clearing local instance collection group ${input}.")
-        aws.mongo.collection.value.drop()
+        aws.mongo.collection.value.find(filter).foreach {
+          obj => aws.mongo.collection.value -= obj
+        }
       })
     ) },
 
