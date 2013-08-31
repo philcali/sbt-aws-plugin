@@ -227,41 +227,48 @@ object Plugin extends sbt.Plugin {
       NamedAwsAction("alert", "Triggers on hot instances", { input =>
         def describeRequest = aws.groupRequest(input, aws.mongo.collection.value, "state" -> "pending")
         val scheduler = Executors.newSingleThreadScheduledExecutor()
-        val callback = new Runnable {
+        val callback = new Runnable { self =>
           def run() {
-            aws.client.value.describeInstances(describeRequest).getReservations() foreach {
+            val jobs = aws.client.value.describeInstances(describeRequest).getReservations() flatMap {
               reservation =>
-              reservation.getInstances() foreach {
+              reservation.getInstances() map {
                 instance =>
                 val obj = MongoDBObject("instanceId" -> instance.getInstanceId())
                 aws.mongo.collection.value
                   .findOne(obj)
                   .filter(_.as[String]("state") != instance.getState().getName())
-                  .foreach {
+                  .map {
                     o =>
                     aws.mongo.collection.value += o ++ (
                       "state" -> instance.getState().getName(),
                       "publicDns" -> instance.getPublicDnsName()
                     )
-                    util.Try {
-                      aws.finished.value(aws.mongo.collection.value.findOneByID(o._id).get)
-                    } recover {
-                      case e =>
-                      streams.value.log.warn(s"AWS finish callback failed: ${e.getMessage}")
-                    }
+                    scheduler.submit(new Runnable{
+                      def run() {
+                        util.Try {
+                          aws.finished.value(aws.mongo.collection.value.findOneByID(o._id).get)
+                        } recover {
+                          case e =>
+                          streams.value.log.warn(s"AWS finish callback failed: ${e.getMessage}")
+                        }
+                      }
+                    }, true)
                   }
               }
             }
-            if (describeRequest.getInstanceIds().isEmpty) {
+
+            val finished = (jobs.isEmpty /: jobs)(_ && _.map(_.get).getOrElse(true))
+            if (describeRequest.getInstanceIds().isEmpty && finished) {
               streams.value.log.info(s"Shutting down poller for group ${input}.")
               scheduler.shutdownNow()
             } else {
               streams.value.log.info(s"Checking group ${input} in 10 seconds.")
+              scheduler.schedule(self, 10L, TimeUnit.SECONDS)
             }
           }
         }
         streams.value.log.info(s"Polling group ${input} for running state.")
-        scheduler.scheduleAtFixedRate(callback, 0L, 10L, TimeUnit.SECONDS)
+        scheduler.submit(callback, true)
       }),
       NamedAwsAction("status", "Checks on the environment status", { input =>
         val request = aws.groupRequest(input, aws.mongo.collection.value)
