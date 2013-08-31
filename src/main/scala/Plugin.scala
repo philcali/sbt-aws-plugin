@@ -40,8 +40,8 @@ import java.util.concurrent.TimeUnit
 
 object Plugin extends sbt.Plugin {
 
-  type InstanceCallback = String => Unit
-  type ConfiguredRun = Image => RunInstancesRequest
+  type InstanceCallback = MongoDBObject => Unit
+  type ConfiguredRun = (String, Image) => RunInstancesRequest
   type InstanceFormat = Reservation => JSONType
 
   case class NamedSSHScript(name: String, description: String = "", execute: SshClient => Unit) extends NamedExecution[SshClient,Unit]
@@ -84,6 +84,14 @@ object Plugin extends sbt.Plugin {
       lazy val config = SettingKey[HostConfigProvider]("aws-ssh-config", "The configure an SSH client")
       lazy val scripts = SettingKey[Seq[NamedSSHScript]]("aws-ssh-scripts", "Some post run execution scripts")
       lazy val run = InputKey[Unit]("aws-ssh-run", "Execute some ssh script on a AWS instance group")
+
+      def connect(instance: MongoDBObject, config: HostConfigProvider)(body: SshClient => Unit) = {
+        import SSH.Result._
+        SSH(instance.as[String]("publicDns"), config)(s => body(s))
+      }
+
+      def connectScript(instance: MongoDBObject, config: HostConfigProvider)(script: NamedSSHScript) =
+        connect(instance, config)(script.execute)
     }
 
     def createInstance(
@@ -94,7 +102,7 @@ object Plugin extends sbt.Plugin {
       input: String
     ) = {
       client
-        .runInstances(configure(image))
+        .runInstances(configure(input, image))
         .getReservation()
         .getInstances() map { instance =>
           val dbObj = MongoDBObject("instanceId" -> instance.getInstanceId())
@@ -128,20 +136,19 @@ object Plugin extends sbt.Plugin {
         .withInstanceType(instanceType)
     }
 
-    def createRequest(group: String, requests: Seq[NamedRequest])(body: ImageRequest => Unit) = group match {
-      case "*" => requests.map(_.execute(new ImageRequest())).foreach(body)
+    def createRequest(group: String, requests: Seq[NamedRequest])(body: (String, ImageRequest) => Unit) = group match {
+      case "*" => requests.foreach(r => body(r.name, r.execute(new ImageRequest())))
       case input => requests
         .find(_.name == group)
         .orElse(Some(NamedAwsRequest("", (_.withFilters(new Filter("name", List(group)))))))
-        .map(_.execute(new ImageRequest()))
-        .foreach(body)
+        .foreach(r => body(r.name, r.execute(new ImageRequest())))
     }
   }
 
   val actionParser: Def.Initialize[State => Parser[(String,String)]] =
     Def.setting {
       (state: State) =>
-      (Space ~> (StringBasic.examples("#action") <~ Space) ~
+      (Space ~> (StringBasic.examples("action") <~ Space) ~
       (token("*") | (aws.requests.value.map(a => token(a.name)).reduceLeft(_ | _))))
   }
 
@@ -177,12 +184,13 @@ object Plugin extends sbt.Plugin {
       }.toList)
     }),
 
-    aws.configuredInstance := (image =>
+    aws.configuredInstance := {
+      case (group, image) =>
       aws.defaultRunRequest(image)
         .withMinCount(1)
         .withMaxCount(1)
         .withSecurityGroups("default")
-    ),
+    },
 
     aws.created := {
       instanceId => println(s"Instance with id $instanceId was created.")
@@ -197,12 +205,12 @@ object Plugin extends sbt.Plugin {
 
     aws.actions := { Seq(
       NamedAwsAction("test", "Tests a given request input", (input => aws.createRequest(input, aws.requests.value) {
-        request =>
-        streams.value.log.info(s"Dry running request group ${input}")
+        case (group, request) =>
+        streams.value.log.info(s"Dry running request group ${group}")
         aws.client.value.describeImages(request).getImages.foreach(println)
       })),
       NamedAwsAction("create", "Creates an evironment", (input => aws.createRequest(input, aws.requests.value) {
-        request =>
+        case (group, request) =>
         aws.client.value.describeImages(request).getImages().foreach {
           image =>
           aws.createInstance(
@@ -210,9 +218,9 @@ object Plugin extends sbt.Plugin {
             aws.mongo.collection.value,
             image,
             aws.configuredInstance.value,
-            input) foreach {
+            group) foreach {
             result =>
-            aws.created.value(result.as[String]("instanceId"))
+            aws.created.value(result)
           }
         }
       })),
@@ -235,7 +243,7 @@ object Plugin extends sbt.Plugin {
                       "state" -> instance.getState().getName(),
                       "publicDns" -> instance.getPublicDnsName()
                     )
-                    aws.finished.value(instance.getInstanceId())
+                    aws.finished.value(o)
                   }
               }
             }
@@ -265,7 +273,7 @@ object Plugin extends sbt.Plugin {
             instance.getCurrentState().getName()
           ))
         }
-        streams.value.log.info("Clearing local instance collection group %s" format input)
+        streams.value.log.info(s"Clearing local instance collection group ${input}.")
         aws.mongo.collection.value.drop()
       })
     ) },
@@ -287,14 +295,13 @@ object Plugin extends sbt.Plugin {
     aws.ssh.config := HostFileConfig(),
     aws.ssh.scripts := Seq(),
     aws.ssh.run := {
-      import SSH.Result._
       sshActionParser.parsed match {
         case (script, group) =>
         aws.ssh.scripts.value.find(_.name == script).foreach {
           script =>
           aws.mongo.collection.value.find(MongoDBObject("group" -> group)).foreach {
             instance =>
-            SSH(instance.as[String]("publicDns"), aws.ssh.config.value)(s => script.execute(s)) match {
+            aws.ssh.connectScript(instance, aws.ssh.config.value)(script) match {
               case Left(msg) => streams.value.log.error(msg)
               case Right(_) => streams.value.log.success("Finished executing %s on instance %s" format (script.name, instance("instanceId")))
             }
