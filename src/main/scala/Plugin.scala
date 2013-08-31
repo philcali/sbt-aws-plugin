@@ -119,7 +119,7 @@ object Plugin extends sbt.Plugin {
               "group" -> input
             )
           )
-          dbObj
+          collection.findOneByID(dbObj._id).get
         }
     }
 
@@ -193,11 +193,11 @@ object Plugin extends sbt.Plugin {
     },
 
     aws.created := {
-      instanceId => println(s"Instance with id $instanceId was created.")
+      instance => println(s"Instance with id ${instance("instanceId")} was created.")
     },
 
     aws.finished := {
-      instanceId => println(s"Instance with id $instanceId is now running.")
+      instance => println(s"Instance with id ${instance("instanceId")} is now running.")
     },
 
     aws.requestDir := baseDirectory.value / "aws-request",
@@ -243,7 +243,7 @@ object Plugin extends sbt.Plugin {
                       "state" -> instance.getState().getName(),
                       "publicDns" -> instance.getPublicDnsName()
                     )
-                    aws.finished.value(o)
+                    aws.finished.value(aws.mongo.collection.value.findOneByID(o._id).get)
                   }
               }
             }
@@ -255,7 +255,7 @@ object Plugin extends sbt.Plugin {
             }
           }
         }
-        streams.value.log.info("Polling group ${input} for running state.")
+        streams.value.log.info(s"Polling group ${input} for running state.")
         scheduler.scheduleAtFixedRate(callback, 0L, 10L, TimeUnit.SECONDS)
       }),
       NamedAwsAction("status", "Checks on the environment status", { input =>
