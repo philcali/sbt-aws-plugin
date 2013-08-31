@@ -90,6 +90,18 @@ object Plugin extends sbt.Plugin {
         SSH(instance.as[String]("publicDns"), config)(s => body(s))
       }
 
+      def connectRetry(instance: MongoDBObject, config: HostConfigProvider, retry: Int = 5, delay: Int = 10000)(body: SshClient => Unit) {
+        if (connect(instance, config)(body).isLeft) {
+          val retryMinusOne = retry - 1
+          if (retryMinusOne > 0) {
+            Thread.sleep(delay)
+            connectRetry(instance, config, retryMinusOne, delay)(body)
+          } else {
+            throw new Exception("aws.connectRetry exceeding retry limit")
+          }
+        }
+      }
+
       def connectScript(instance: MongoDBObject, config: HostConfigProvider)(script: NamedSSHScript) =
         connect(instance, config)(script.execute)
     }
@@ -229,54 +241,37 @@ object Plugin extends sbt.Plugin {
           val request = aws.groupRequest(input, aws.mongo.collection.value, "state" -> "pending")
           if (request.getInstanceIds.isEmpty) None else Some(request)
         }
-        val scheduler = Executors.newSingleThreadScheduledExecutor()
-        val callback = new Runnable {
-          def run() {
-            describeRequest.foreach {
-              request =>
-              aws.client.value.describeInstances(request).getReservations() foreach {
-                reservation =>
-                reservation.getInstances() foreach {
-                  instance =>
-                  val obj = MongoDBObject("instanceId" -> instance.getInstanceId())
-                  aws.mongo.collection.value
-                    .findOne(obj)
-                    .filter(_.as[String]("state") != instance.getState().getName())
-                    .foreach {
-                      o =>
-                      aws.mongo.collection.value += o ++ (
-                        "state" -> instance.getState().getName(),
-                        "publicDns" -> instance.getPublicDnsName()
-                      )
-                      // In my experience... just because the machine is "running"
-                      // doesn't mean it's accepting connections
-                      scheduler.schedule(new Runnable {
-                        def run() {
-                          util.Try {
-                            aws.finished.value(aws.mongo.collection.value.findOneByID(o._id).get)
-                          }.recover {
-                            case e =>
-                            streams.value.log.warn(s"AWS finish callback failed: ${e.getMessage}")
-                          }.get
-                        }
-                      }, 20L, TimeUnit.SECONDS)
+        do {
+          describeRequest.foreach {
+            request =>
+            aws.client.value.describeInstances(request).getReservations() foreach {
+              reservation =>
+              reservation.getInstances() foreach {
+                instance =>
+                val obj = MongoDBObject("instanceId" -> instance.getInstanceId())
+                aws.mongo.collection.value
+                  .findOne(obj)
+                  .filter(_.as[String]("state") != instance.getState().getName())
+                  .foreach {
+                    o =>
+                    aws.mongo.collection.value += o ++ (
+                      "state" -> instance.getState().getName(),
+                      "publicDns" -> instance.getPublicDnsName()
+                    )
+                    try {
+                      aws.finished.value(aws.mongo.collection.value.findOneByID(o._id).get)
+                    } catch {
+                      case e: Throwable =>
+                      streams.value.log.warn(s"AWS finish callback failed: ${e.getMessage}")
                     }
-                }
+                  }
               }
             }
-
-            describeRequest match {
-              case Some(_) =>
-              streams.value.log.info(s"Checking group ${input} in 10 seconds.")
-              case None =>
-              streams.value.log.info(s"Shutting down poller for group ${input}.")
-              scheduler.shutdown()
-              scheduler.awaitTermination(5L, TimeUnit.MINUTES)
-            }
           }
-        }
-        streams.value.log.info(s"Polling group ${input} for running state.")
-        scheduler.scheduleAtFixedRate(callback, 0L, 10L, TimeUnit.SECONDS)
+          streams.value.log.info(s"Polling group ${input} for running state.")
+          Thread.sleep(1000)
+        } while(describeRequest.isDefined)
+        streams.value.log.success(s"Group ${input} is hot.")
       }),
       NamedAwsAction("status", "Checks on the environment status", { input =>
         val request = aws.groupRequest(input, aws.mongo.collection.value)
