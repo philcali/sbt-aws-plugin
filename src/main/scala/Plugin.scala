@@ -44,7 +44,9 @@ object Plugin extends sbt.Plugin {
   type ConfiguredRun = (String, Image) => RunInstancesRequest
   type InstanceFormat = Reservation => JSONType
 
-  case class NamedSSHScript(name: String, description: String = "", execute: SshClient => Either[String,Any]) extends NamedExecution[SshClient, Either[String,Any]]
+  implicit class SshFileTransfers(client: SshClient) extends SshClient(client.config) with ScpTransferable
+
+  case class NamedSshScript(name: String, description: String = "", execute: SshClient => Either[String,Any]) extends NamedExecution[SshClient, Either[String,Any]]
   case class NamedAwsAction(name: String, description: String = "", execute: String => Unit) extends NamedExecution[String,Unit]
   case class NamedAwsRequest(name: String, execute: ImageRequest => ImageRequest) extends NamedRequest
   case class JSONAwsFileRequest(name: String, base: File) extends JSONRequestExecution {
@@ -83,7 +85,7 @@ object Plugin extends sbt.Plugin {
 
     object ssh {
       lazy val config = SettingKey[HostConfigProvider]("aws-ssh-config", "The configure an SSH client")
-      lazy val scripts = SettingKey[Seq[NamedSSHScript]]("aws-ssh-scripts", "Some post run execution scripts")
+      lazy val scripts = SettingKey[Seq[NamedSshScript]]("aws-ssh-scripts", "Some post run execution scripts")
       lazy val run = InputKey[Unit]("aws-ssh-run", "Execute some ssh script on a AWS instance group")
 
       def connect(instance: MongoDBObject, config: HostConfigProvider)(body: SshClient => Either[String,Any]) = {
@@ -100,7 +102,7 @@ object Plugin extends sbt.Plugin {
         }
       }
 
-      def connectScript(instance: MongoDBObject, config: HostConfigProvider)(script: NamedSSHScript) =
+      def connectScript(instance: MongoDBObject, config: HostConfigProvider)(script: NamedSshScript) =
         connect(instance, config)(script.execute)
     }
 
