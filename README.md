@@ -45,10 +45,10 @@ At this point in the plugin's life, the main points are:
 - Terminate the logical groups
 
 Logical groups are _named_ describeImageRequests, or
-`NamedAwsRequest`s. These are added via the `aws.requests` key.
+`NamedAwsRequest`s. These are added via the `aws.ec2.requests` key.
 
 The ability to create environment from these logical groups is
-crucial, and that's where `aws.actions` comes into play. This is a
+crucial, and that's where `aws.ec2.actions` comes into play. This is a
 collection of `NamedAwsAction`s.
 
 Built-in actions are:
@@ -59,12 +59,12 @@ Built-in actions are:
 - `status`: Checks the status of the group from Amazon
 - `terminate`: Terminates the group
 
-Once an instance is created, the `aws.created` callback is invoked.
+Once an instance is created, the `aws.ec2.created` callback is invoked.
 This callback is particularly useful for mapping elastic IP
 addresses, monitors, and status checks to newly created instances
 in the logical group.
 
-Once instances are denoted to being _hot_, the `aws.finished`
+Once instances are denoted to being _hot_, the `aws.ec2.finished`
 callback is invoked. This callback is far more useful as it might
 involve organized coupling of two or more logical groups.
 
@@ -95,7 +95,7 @@ It's pretty clear our logical groups here:
 Assuming our `aws.sbt` contains the credentials, and `ssh.sbt`
 contains the ssh client info, we need to define the image requests.
 
-- `aws-request/hub.json`
+- `aws-ec2-request/hub.json`
 
 ```
 {
@@ -106,7 +106,7 @@ contains the ssh client info, we need to define the image requests.
 }
 ```
 
-- `aws-request/nodes.json`
+- `aws-ec2-request/nodes.json`
 
 ```
 {
@@ -117,7 +117,7 @@ contains the ssh client info, we need to define the image requests.
 }
 ```
 
-- `aws-request/app.json`
+- `aws-ec2-request/app.json`
 
 ```
 {
@@ -131,37 +131,37 @@ contains the ssh client info, we need to define the image requests.
 Now add the requests to the requests:
 
 ```
-aws.requests ++= Seq(
-  JSONAwsFileRequest("hub", aws.requestDir.value),
-  JSONAwsFileRequest("nodes", aws.requestDir.value),
-  JSONAwsFileRequest("app", aws.requestDir.value)
+aws.ec2.requests ++= Seq(
+  JSONAwsFileRequest("hub", aws.ec2.requestDir.value),
+  JSONAwsFileRequest("nodes", aws.ec2.requestDir.value),
+  JSONAwsFileRequest("app", aws.ec2.requestDir.value)
 )
 ```
 
-It is recommended to customize the `aws.configuredInstance` key, to
+It is recommended to customize the `aws.ec2.configuredInstance` key, to
 attach instance size and security group info for the `create` action.
 
 ```
-aws.configuredInstance := {
+aws.ec2.configuredInstance := {
   case ("hub", image) =>
-  defaultRunRequest(image, "m1.small")
+  aws.ec2.defaultRunRequest(image, "m1.small")
     .withMinCount(1)
     .withMaxCount(1)
     .withSecurityGroups("Selenium Grid Server")
   case ("nodes", image) =>
-  defaultRunRequest(image)
+  aws.ec2.defaultRunRequest(image)
     .withMinCount(1)
     .withMaxCount(1)
     .withSecurityGroups("UI Group")
   case ("app", image) =>
-  defaultRunRequest(image, "m1.small")
+  aws.ec2.defaultRunRequest(image, "m1.small")
     .withMinCount(1)
     .withMaxCount(1)
     .withSecurityGroups("App Group")
 }
 ```
 
-At this point, you can now run `awsRun create nodes` in the shell,
+At this point, you can now run `awsEc2Run create nodes` in the shell,
 and it will create all of the UI node instances. Automatically
 creating the instances doesn't give us much if they can't wire
 themselves up to one another. In the Selenium grid architecture,
@@ -172,11 +172,11 @@ the nodes to it.
 ```
 val seleniumJar = "java -jar selenium-server.jar"
 
-aws.ssh.scripts += NamedSshScript("grid", {
+aws.ssh.scripts += NamedSshScript("grid", execute = {
   _.exec(s"${seleniumJar} -role hub")
 })
 
-aws.ssh.scripts += NamedSshScript("node", {
+aws.ssh.scripts += NamedSshScript("node", execute = {
   client =>
   val query = MongoDBObject("group" -> "hub")
   aws.mongo.collection.value.findOne(query) match {
@@ -187,7 +187,7 @@ aws.ssh.scripts += NamedSshScript("node", {
   }
 })
 
-aws.ssh.scripts += NamedSshScript("deploy", {
+aws.ssh.scripts += NamedSshScript("deploy", execute = {
   sshClient =>
   val jar = "~/" + (jarName in assembly).value
   val assemblyJar = (outputPath in assembly).value.getAbsolutePath
@@ -202,10 +202,10 @@ Now that the scripts are in place, we can execute them when the
 instance is hot, by tying it in `aws.finished`.
 
 ```
-aws.finished := {
+aws.ec2.finished := {
   instance =>
   val execute = (script: NamedSshScript =>
-    aws.ssh.retry(limit = 5, delay = 10000) {
+    aws.ssh.retry(delay = aws.ec2.pollingInterval.value) {
       aws.ssh.connectScript(instance, aws.ssh.config.value)(script)
     }
   )
@@ -223,10 +223,10 @@ aws.finished := {
 The finished callbacks will fire upon logical group alert:
 
 ```
-> awsRun create *
-> awsRun alert hub
-> awsRun alert nodes
-> awsRun alert app
+> awsEc2Run create *
+> awsEc2Run alert hub
+> awsEc2Run alert nodes
+> awsEc2Run alert app
 > assembly
 > awsSshRun deploy app
 ```
@@ -235,8 +235,8 @@ Assuming that `test-run` will launch the Selenium test suite with an
 arg to take in the hub url and app url:
 
 ```
-> awsRun status app
-> awsRun status hub
+> awsEc2Run status app
+> awsEc2Run status hub
 ```
 
 That'll give you the public DNS of the hub and app, respectively.
@@ -248,9 +248,9 @@ That'll give you the public DNS of the hub and app, respectively.
 Run it as much as you like until you are ready to destroy the groups.
 
 ```
-> awsRun terminate app
-> awsRun terminate nodes
-> awsRun terminate hub
+> awsEc2Run terminate app
+> awsEc2Run terminate nodes
+> awsEc2Run terminate hub
 ```
 
 Obviously, this process could be a improved a bit if the runner could
