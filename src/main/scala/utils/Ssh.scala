@@ -6,8 +6,42 @@ import com.mongodb.casbah.Imports._
 import com.decodified.scalassh.SSH
 import com.decodified.scalassh.SshClient
 import com.decodified.scalassh.HostConfigProvider
+import net.schmizz.sshj.xfer.TransferListener
+import net.schmizz.sshj.common.StreamCopier
 
 trait Ssh {
+  case class ConsoleListener(log: sbt.Logger) extends TransferListener with StreamCopier.Listener {
+    private var file = "unknown"
+    private var total = 0L
+    private var progress = 0L
+
+    def finishedDir() {
+      log.success(s"Finished transferring directory ${file}.")
+    }
+
+    def finishedFile() {
+      log.success(s"Finished transferring file ${file}.")
+    }
+
+    def directory(name: String) = {
+      file = name
+      log.info(s"Started transferring directory ${file}.")
+      this
+    }
+
+    def file(name: String, size: Long): StreamCopier.Listener = {
+      file = name
+      total = size
+      log.info(s"Started transferring file ${file} of bytes ${size}.")
+      this
+    }
+
+    def reportProgress(transferred: Long) {
+      progress = progress + transferred
+      log.info(s"Transferring ${file} ${progress} / ${total} bytes")
+    }
+  }
+
   /**
    * Retries some body for a defined limit and delay
    *

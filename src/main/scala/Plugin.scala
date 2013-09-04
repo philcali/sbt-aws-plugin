@@ -131,7 +131,7 @@ object Plugin extends sbt.Plugin {
   private val sshExecuteParser: Def.Initialize[Parser[(String,String)]] =
     Def.setting {
       (Space ~> (awsEc2.requests.value.map(a => token(a.name)).reduceLeft(_ | _) <~ Space) ~
-      repsep(StringBasic, Space) map {
+      repsep(StringBasic.examples("command", "<arg1>", "<arg2>"), Space) map {
         case (group, commands) => group -> commands.mkString(" ")
       })
     }
@@ -139,7 +139,7 @@ object Plugin extends sbt.Plugin {
   private val sshUploadParser: Def.Initialize[Parser[(String, String, String)]] =
     Def.setting {
       (Space ~> (awsEc2.requests.value.map(a => token(a.name)).reduceLeft(_ | _) <~ Space) ~
-        (StringBasic <~ Space) ~ StringBasic) map {
+        (StringBasic.examples("localFile") <~ Space) ~ StringBasic.examples("remoteFile")) map {
           case ((first, second), third) => (first, second, third)
         }
     }
@@ -298,7 +298,7 @@ object Plugin extends sbt.Plugin {
         awsMongo.collection.value.find(query).foreach {
           instance =>
           awsSsh.connect(instance, awsSsh.config.value) {
-            _.upload(localPath, remotePath)
+            _.upload(localPath, remotePath)(awsSsh.ConsoleListener(streams.value.log))
           }
         }
       }

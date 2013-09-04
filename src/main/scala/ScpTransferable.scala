@@ -4,6 +4,8 @@ import com.decodified.scalassh.SshClient
 
 import net.schmizz.sshj.sftp.SFTPClient
 import net.schmizz.sshj.xfer.scp.SCPFileTransfer
+import net.schmizz.sshj.xfer.TransferListener
+import net.schmizz.sshj.xfer.LoggingTransferListener
 
 /**
  * Extends an SshClient with file transferable abilities
@@ -33,15 +35,18 @@ trait ScpTransferable {
    * Performs some body on a SCP transfer channel
    *
    * @param fun (SCPFileTransfer =&gt; Unit)
+   * @param listener TransferListener
    * @return Either[String, ScpTransferable]
    */
-  def withFileTransfer(fun: SCPFileTransfer => Unit) = {
+  def withFileTransfer(fun: SCPFileTransfer => Unit)(listener: TransferListener) = {
     authenticatedClient.right.flatMap {
       client =>
       startSession(client).right.flatMap {
         session =>
         protect("SCP file transfer") {
-          fun(client.newSCPFileTransfer())
+          val transfer = client.newSCPFileTransfer()
+          transfer.setTransferListener(listener)
+          fun(transfer)
           this
         }
       }
@@ -55,8 +60,8 @@ trait ScpTransferable {
    * @param remotePath String
    * @return Either[String, ScpTransferable]
    */
-  def upload(localPath: String, remotePath: String) = {
-    withFileTransfer(_.upload(localPath, remotePath))
+  def upload(localPath: String, remotePath: String)(implicit listener: TransferListener = new LoggingTransferListener()) = {
+    withFileTransfer(_.upload(localPath, remotePath))(listener)
   }
 
   /**
@@ -66,7 +71,7 @@ trait ScpTransferable {
    * @param localPath String
    * @return Either[String, ScpTransferable]
    */
-  def download(remotePath: String, localPath: String) = {
-    withFileTransfer(_.download(remotePath, localPath))
+  def download(remotePath: String, localPath: String)(implicit listener: TransferListener = new LoggingTransferListener()) = {
+    withFileTransfer(_.download(remotePath, localPath))(listener)
   }
 }
