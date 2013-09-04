@@ -45,10 +45,10 @@ At this point in the plugin's life, the main points are:
 - Terminate the logical groups
 
 Logical groups are _named_ describeImageRequests, or
-`NamedAwsRequest`s. These are added via the `aws.ec2.requests` key.
+`NamedAwsRequest`s. These are added via the `awsEc2.requests` key.
 
 The ability to create environment from these logical groups is
-crucial, and that's where `aws.ec2.actions` comes into play. This is a
+crucial, and that's where `awsEc2.actions` comes into play. This is a
 collection of `NamedAwsAction`s.
 
 Built-in actions are:
@@ -59,12 +59,12 @@ Built-in actions are:
 - `status`: Checks the status of the group from Amazon
 - `terminate`: Terminates the group
 
-Once an instance is created, the `aws.ec2.created` callback is invoked.
+Once an instance is created, the `awsEc2.created` callback is invoked.
 This callback is particularly useful for mapping elastic IP
 addresses, monitors, and status checks to newly created instances
 in the logical group.
 
-Once instances are denoted to being _hot_, the `aws.ec2.finished`
+Once instances are denoted to being _hot_, the `awsEc2.finished`
 callback is invoked. This callback is far more useful as it might
 involve organized coupling of two or more logical groups.
 
@@ -128,33 +128,23 @@ contains the ssh client info, we need to define the image requests.
 }
 ```
 
-Now add the requests to the requests:
+It is recommended to customize the `awsEc2.configuredInstance` key, to
+attach instance size, security group, or key pair info for the `create` action.
 
 ```
-aws.ec2.requests ++= Seq(
-  JSONAwsFileRequest("hub", aws.ec2.requestDir.value),
-  JSONAwsFileRequest("nodes", aws.ec2.requestDir.value),
-  JSONAwsFileRequest("app", aws.ec2.requestDir.value)
-)
-```
-
-It is recommended to customize the `aws.ec2.configuredInstance` key, to
-attach instance size and security group info for the `create` action.
-
-```
-aws.ec2.configuredInstance := {
+awsEc2.configuredInstance := {
   case ("hub", image) =>
-  aws.ec2.defaultRunRequest(image, "m1.small")
+  awsEc2.defaultRunRequest(image, "m1.small")
     .withMinCount(1)
     .withMaxCount(1)
     .withSecurityGroups("Selenium Grid Server")
   case ("nodes", image) =>
-  aws.ec2.defaultRunRequest(image)
+  awsEc2.defaultRunRequest(image)
     .withMinCount(1)
     .withMaxCount(1)
     .withSecurityGroups("UI Group")
   case ("app", image) =>
-  aws.ec2.defaultRunRequest(image, "m1.small")
+  awsEc2.defaultRunRequest(image, "m1.small")
     .withMinCount(1)
     .withMaxCount(1)
     .withSecurityGroups("App Group")
@@ -172,14 +162,14 @@ the nodes to it.
 ```
 val seleniumJar = "java -jar selenium-server.jar"
 
-aws.ssh.scripts += NamedSshScript("grid", execute = {
+awsSsh.scripts += NamedSshScript("grid", execute = {
   _.exec(s"${seleniumJar} -role hub")
 })
 
-aws.ssh.scripts += NamedSshScript("node", execute = {
+awsSsh.scripts += NamedSshScript("node", execute = {
   client =>
   val query = MongoDBObject("group" -> "hub")
-  aws.mongo.collection.value.findOne(query) match {
+  awsMongo.collection.value.findOne(query) match {
     case Some(instance) =>
     val hubUrl = s"http://${instance("publicDns")}:4444/grid/register"
     client.exec(s"${seleniumJar} -role node -hub ${hubUrl}")
@@ -187,7 +177,7 @@ aws.ssh.scripts += NamedSshScript("node", execute = {
   }
 })
 
-aws.ssh.scripts += NamedSshScript("deploy", execute = {
+awsSsh.scripts += NamedSshScript("deploy", execute = {
   sshClient =>
   val jar = "~/" + (jarName in assembly).value
   val assemblyJar = (outputPath in assembly).value.getAbsolutePath
@@ -199,21 +189,15 @@ aws.ssh.scripts += NamedSshScript("deploy", execute = {
 ```
 
 Now that the scripts are in place, we can execute them when the
-instance is hot, by tying it in `aws.finished`.
+instance is hot, by tying it in `awsEc2.finished`.
 
 ```
-aws.ec2.finished := {
-  instance =>
-  val execute = (script: NamedSshScript =>
-    aws.ssh.retry(delay = aws.ec2.pollingInterval.value) {
-      aws.ssh.connectScript(instance, aws.ssh.config.value)(script)
-    }
-  )
-  instance.get("group") foreach {
+awsEc2.finished := {
+  _.get("group") foreach {
     case "hub" =>
-    aws.ssh.scripts.value.find(_.name == "grid") foreach (execute)
+    awsSsh.run.evaluated("grid", "hub")
     case "nodes" =>
-    aws.ssh.scripts.value.find(_.name == "node") foreach (execute)
+    awsSsh.run.evaluated("node", "nodes")
     case "app" =>
     streams.value.log.info("Instance is running.")
   }
