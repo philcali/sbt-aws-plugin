@@ -116,19 +116,19 @@ object Plugin extends sbt.Plugin {
    */
   object awsSsh extends keys.Ssh with utils.Ssh
 
-  private val actionParser: Def.Initialize[Parser[(String,String)]] =
+  private lazy val actionParser: Def.Initialize[Parser[(String,String)]] =
     Def.setting {
       (Space ~> (StringBasic.examples("action") <~ Space) ~
       (token("*") | (awsEc2.requests.value.map(a => token(a.name)).reduceLeft(_ | _))))
   }
 
-  private val sshActionParser: Def.Initialize[Parser[(String,String)]] =
+  private lazy val sshActionParser: Def.Initialize[Parser[(String,String)]] =
     Def.setting {
       (Space ~> (awsSsh.scripts.value.map(s => token(s.name)).reduceLeft(_ | _) <~ Space) ~
       (awsEc2.requests.value.map(r => token(r.name)).reduceLeft(_|_)))
     }
 
-  private val sshExecuteParser: Def.Initialize[Parser[(String,String)]] =
+  private lazy val sshExecuteParser: Def.Initialize[Parser[(String,String)]] =
     Def.setting {
       (Space ~> (awsEc2.requests.value.map(a => token(a.name)).reduceLeft(_ | _) <~ Space) ~
       repsep(StringBasic.examples("command", "<arg1>", "<arg2>"), Space) map {
@@ -136,7 +136,7 @@ object Plugin extends sbt.Plugin {
       })
     }
 
-  private val sshUploadParser: Def.Initialize[Parser[(String, String, String)]] =
+  private lazy val sshUploadParser: Def.Initialize[Parser[(String, String, String)]] =
     Def.setting {
       (Space ~> (awsEc2.requests.value.map(a => token(a.name)).reduceLeft(_ | _) <~ Space) ~
         (StringBasic.examples("localFile") <~ Space) ~ StringBasic.examples("remoteFile")) map {
