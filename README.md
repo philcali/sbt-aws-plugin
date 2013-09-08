@@ -216,9 +216,7 @@ The running callbacks will fire upon logical group alert:
 
 ```
 > awsEc2Run create *
-> awsEc2Run alert hub
-> awsEc2Run alert nodes
-> awsEc2Run alert app
+> awsEc2Run alert *
 > assembly
 > awsSshRun deploy app
 ```
