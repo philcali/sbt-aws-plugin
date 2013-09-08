@@ -2,11 +2,9 @@ package com.github.philcali.aws
 package keys
 
 import sbt._
+import com.decodified.scalassh.HostConfigProvider
 
 trait Ssh {
-  type HostConfig = com.decodified.scalassh.HostConfig
-  type HostConfigProvider = com.decodified.scalassh.HostConfigProvider
-
   lazy val config = SettingKey[HostConfigProvider]("aws-ssh-config", "The configure an SSH client")
   lazy val scripts = SettingKey[Seq[Plugin.NamedSshScript]]("aws-ssh-scripts", "Some post run execution scripts")
   lazy val listScripts = TaskKey[Unit]("aws-ssh-list-scripts", "Lists the SSH scripts.")

@@ -55,6 +55,8 @@ Built-in actions are:
 
 - `test`: Dry runs the request with your filters to "test" the result
 - `create`: Creates instances from the logical group
+- `start`: Starts instances from the logical group marked "stopped"
+- `stop`: Stops instances from the logical group marked "running"
 - `alert`: Watches created instances from the logical group
 - `status`: Checks the status of the group from Amazon
 - `terminate`: Terminates the group
@@ -64,7 +66,7 @@ This callback is particularly useful for mapping elastic IP
 addresses, monitors, and status checks to newly created instances
 in the logical group.
 
-Once instances are denoted to being _hot_, the `awsEc2.finished`
+Once instances are denoted to being _hot_, the `awsEc2.running`
 callback is invoked. This callback is far more useful as it might
 involve organized coupling of two or more logical groups.
 
@@ -189,22 +191,28 @@ awsSsh.scripts += NamedSshScript("deploy", execute = {
 ```
 
 Now that the scripts are in place, we can execute them when the
-instance is hot, by tying it in `awsEc2.finished`.
+instance is hot, by tying it in `awsEc2.running`.
 
 ```
-awsEc2.finished := {
-  _.get("group") foreach {
+awsEc2.running := {
+  instance =>
+  val execute = (script: NamedSshScript) => {
+    awsSsh.retry(delay = awsEc2.pollingInterval.value) {
+      awsSsh.connectScript(instance, awsSsh.config.value)(script)
+    }
+  }
+  instance.get("group") foreach {
     case "hub" =>
-    awsSsh.run.evaluated("grid", "hub")
+    awsSsh.scripts.value.find(_.name == "grid") foreach (execute)
     case "nodes" =>
-    awsSsh.run.evaluated("node", "nodes")
+    awsSsh.scripts.value.find(_.name == "node") foreach (execute)
     case "app" =>
     streams.value.log.info("Instance is running.")
   }
 }
 ```
 
-The finished callbacks will fire upon logical group alert:
+The running callbacks will fire upon logical group alert:
 
 ```
 > awsEc2Run create *

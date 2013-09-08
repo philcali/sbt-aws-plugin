@@ -25,7 +25,12 @@ trait ScpTransferable {
       startSession(client).right.flatMap {
         session =>
         protect("SFTP client failed") {
-          fun(client.newSFTPClient())
+          val ftpClient = client.newSFTPClient()
+          try {
+            fun(ftpClient)
+          } finally {
+            ftpClient.close()
+          }
         }
       }
     }
@@ -43,7 +48,7 @@ trait ScpTransferable {
       client =>
       startSession(client).right.flatMap {
         session =>
-        protect("SCP file transfer") {
+        protect("SCP file transfer failed") {
           val transfer = client.newSCPFileTransfer()
           transfer.setTransferListener(listener)
           fun(transfer)
@@ -58,6 +63,7 @@ trait ScpTransferable {
    *
    * @param localPath String
    * @param remotePath String
+   * @param [implicit] listener TransferListener
    * @return Either[String, ScpTransferable]
    */
   def upload(localPath: String, remotePath: String)(implicit listener: TransferListener = new LoggingTransferListener()) = {
@@ -69,6 +75,7 @@ trait ScpTransferable {
    *
    * @param remotePath String
    * @param localPath String
+   * @param [implicit] listener TransferListener
    * @return Either[String, ScpTransferable]
    */
   def download(remotePath: String, localPath: String)(implicit listener: TransferListener = new LoggingTransferListener()) = {

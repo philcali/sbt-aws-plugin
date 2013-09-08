@@ -11,12 +11,15 @@ import com.amazonaws.auth.{
 }
 import com.amazonaws.services.ec2.AmazonEC2Client
 import com.amazonaws.services.ec2.model.{
-  Reservation,
-  Image,
   Filter,
-  RunInstancesRequest,
+  Image,
+  InstanceStateChange,
   DescribeImagesRequest => ImageRequest,
   DescribeInstancesRequest,
+  Reservation,
+  RunInstancesRequest,
+  StartInstancesRequest,
+  StopInstancesRequest,
   TerminateInstancesRequest
 }
 
@@ -38,6 +41,7 @@ object Plugin extends sbt.Plugin {
   type InstanceCallback = MongoDBObject => Unit
   type ConfiguredRun = (String, Image) => RunInstancesRequest
   type InstanceFormat = Reservation => JSONType
+  type StateChangeFormat = InstanceStateChange => String
 
   /**
    * Implicitly converts a SshClient to ScpTransferable
@@ -116,33 +120,60 @@ object Plugin extends sbt.Plugin {
    */
   object awsSsh extends keys.Ssh with utils.Ssh
 
-  private lazy val actionParser: Def.Initialize[Parser[(String,String)]] =
-    Def.setting {
-      (Space ~> (StringBasic.examples("action") <~ Space) ~
-      (token("*") | (awsEc2.requests.value.map(a => token(a.name)).reduceLeft(_ | _))))
+  private object awsParsers {
+    /**
+     * Safe tokeizer for a named collection
+     *
+     * @param values Seq[NamedExecution]
+     * @return Parser
+     */
+    def tokizedNames(values: Seq[NamedExecution[_,_]]) = values.headOption match {
+      case None =>
+      StringBasic.examples("<none defined>")
+      case Some(_) =>
+      values.map(a => token(a.name)).reduceLeft(_ | _)
+    }
+
+    /**
+     * Retrieves tab completion for triggering an ec2 action
+     */
+    lazy val ec2Action: Def.Initialize[Parser[(String,String)]] =
+      Def.setting {
+        (Space ~> (StringBasic.examples("action") <~ Space) ~
+        (token("*") | tokizedNames(awsEc2.requests.value)))
+      }
+
+    /**
+     * Retrieves tab completion for triggering an ssh action script
+     */
+    lazy val sshAction: Def.Initialize[Parser[(String,String)]] =
+      Def.setting {
+        (Space ~> (tokizedNames(awsSsh.scripts.value) <~ Space) ~
+        (tokizedNames(awsEc2.requests.value)))
+      }
+
+    /**
+     * Retrieves tab completion for triggering a one time ssh action
+     */
+    lazy val sshExecute: Def.Initialize[Parser[(String,String)]] =
+      Def.setting {
+        (Space ~> (tokizedNames(awsEc2.requests.value) <~ Space) ~
+        repsep(StringBasic.examples("command", "<arg1>", "<arg2>"), Space) map {
+          case (group, commands) => group -> commands.mkString(" ")
+        })
+      }
+
+    /**
+     * Retrieves tab completion for triggering an upload
+     */
+    lazy val sshUpload: Def.Initialize[Parser[(String, String, String)]] =
+      Def.setting {
+        (Space ~> (tokizedNames(awsEc2.requests.value) <~ Space) ~
+          (StringBasic.examples("localFile") <~ Space) ~ StringBasic.examples("remoteFile")) map {
+            case ((first, second), third) => (first, second, third)
+          }
+      }
   }
-
-  private lazy val sshActionParser: Def.Initialize[Parser[(String,String)]] =
-    Def.setting {
-      (Space ~> (awsSsh.scripts.value.map(s => token(s.name)).reduceLeft(_ | _) <~ Space) ~
-      (awsEc2.requests.value.map(r => token(r.name)).reduceLeft(_|_)))
-    }
-
-  private lazy val sshExecuteParser: Def.Initialize[Parser[(String,String)]] =
-    Def.setting {
-      (Space ~> (awsEc2.requests.value.map(a => token(a.name)).reduceLeft(_ | _) <~ Space) ~
-      repsep(StringBasic.examples("command", "<arg1>", "<arg2>"), Space) map {
-        case (group, commands) => group -> commands.mkString(" ")
-      })
-    }
-
-  private lazy val sshUploadParser: Def.Initialize[Parser[(String, String, String)]] =
-    Def.setting {
-      (Space ~> (awsEc2.requests.value.map(a => token(a.name)).reduceLeft(_ | _) <~ Space) ~
-        (StringBasic.examples("localFile") <~ Space) ~ StringBasic.examples("remoteFile")) map {
-          case ((first, second), third) => (first, second, third)
-        }
-    }
 
   lazy val awsMongoSettings: Seq[Setting[_]] = Seq(
     awsMongo.client := MongoClient(),
@@ -168,6 +199,13 @@ object Plugin extends sbt.Plugin {
         ).filter(_._2 != null))
       }.toList)
     }),
+    awsEc2.stateChangeFormat := (instance =>
+      "%s: %s => %s" format(
+        instance.getInstanceId(),
+        instance.getCurrentState(),
+        instance.getPreviousState()
+      )
+    ),
 
     awsEc2.configuredInstance := {
       case (group, image) =>
@@ -177,12 +215,16 @@ object Plugin extends sbt.Plugin {
         .withSecurityGroups("default")
     },
 
-    awsEc2.created := {
+    awsEc2.started := {
       instance => println(s"Instance with id ${instance("instanceId")} was created.")
     },
 
-    awsEc2.finished := {
+    awsEc2.running := {
       instance => println(s"Instance with id ${instance("instanceId")} is now running.")
+    },
+
+    awsEc2.stopped := {
+      instance => println(s"instance with id ${instance("instanceId")} is now stopped.")
     },
 
     awsEc2.pollingInterval := 10000,
@@ -195,6 +237,7 @@ object Plugin extends sbt.Plugin {
         streams.value.log.info(s"Dry running request group ${group}")
         awsEc2.client.value.describeImages(request).getImages.foreach(println)
       })),
+
       NamedAwsAction("create", "Creates an evironment", (input => awsEc2.createRequest(input, awsEc2.requests.value) {
         case (group, request) =>
         awsEc2.client.value.describeImages(request).getImages().foreach {
@@ -206,10 +249,39 @@ object Plugin extends sbt.Plugin {
             awsEc2.configuredInstance.value,
             group) foreach {
             result =>
-            awsEc2.created.value(result)
+            awsEc2.started.value(result)
           }
         }
       })),
+
+      NamedAwsAction("start", "Starts an instance environment", { input =>
+        val query = MongoDBObject("group" -> input, "state" -> "stopped")
+        val startRequest = new StartInstancesRequest(awsMongo.collection.value.find(query).map(_.as[String]("instanceId")).toList)
+        awsEc2.client.value.startInstances(startRequest).getStartingInstances().foreach {
+          instance =>
+          streams.value.log.success(awsEc2.stateChangeFormat.value(instance))
+          val record = MongoDBObject("instanceId" -> instance.getInstanceId())
+          awsMongo.collection.value += awsMongo.collection.value.findOne(record).getOrElse(record) ++ (
+            "state" -> "pending"
+          )
+          awsEc2.started.value(awsMongo.collection.value.findOne(record).get)
+        }
+      }),
+
+      NamedAwsAction("stop", "Stops an instance environment", { input =>
+        val query = MongoDBObject("group" -> input, "state" -> "running")
+        val stopRequest = new StopInstancesRequest(awsMongo.collection.value.find(query).map(_.as[String]("instanceId")).toList)
+        awsEc2.client.value.stopInstances(stopRequest).getStoppingInstances().foreach {
+          instance =>
+          streams.value.log.success(awsEc2.stateChangeFormat.value(instance))
+          val record = MongoDBObject("instanceId" -> instance.getInstanceId())
+          awsMongo.collection.value += awsMongo.collection.value.findOne(record).getOrElse(record) ++ (
+            "state" -> "stopped"
+          )
+          awsEc2.stopped.value(awsMongo.collection.value.findOne(record).get)
+        }
+      }),
+
       NamedAwsAction("alert", "Triggers on hot instances", { input =>
         def describeRequest = {
           val request = awsEc2.groupRequest(input, awsMongo.collection.value, "state" -> "pending")
@@ -233,10 +305,10 @@ object Plugin extends sbt.Plugin {
                       "publicDns" -> instance.getPublicDnsName()
                     )
                     try {
-                      awsEc2.finished.value(awsMongo.collection.value.findOneByID(o._id).get)
+                      awsEc2.running.value(awsMongo.collection.value.findOneByID(o._id).get)
                     } catch {
                       case e: Throwable =>
-                      streams.value.log.warn(s"aws.finished callback failed: ${e.getMessage}")
+                      streams.value.log.warn(s"aws.runngin callback failed: ${e.getMessage}")
                     }
                   }
               }
@@ -249,20 +321,19 @@ object Plugin extends sbt.Plugin {
         } while(describeRequest.isDefined)
         streams.value.log.success(s"Group ${input} is hot.")
       }),
+
       NamedAwsAction("status", "Checks on the environment status", { input =>
         val request = awsEc2.groupRequest(input, awsMongo.collection.value)
         val formats = awsEc2.client.value.describeInstances(request).getReservations().map(awsEc2.instanceFormat.value)
         streams.value.log.info(JSONArray(formats.toList).toString(awsEc2.jsonFormat.value))
       }),
+
       NamedAwsAction("terminate", "Terminates the environment", { input =>
         val filter = MongoDBObject("group" -> input)
         val request = new TerminateInstancesRequest(awsMongo.collection.value.find(filter).map(_.as[String]("instanceId")).toList)
-        awsEc2.client.value.terminateInstances(request).getTerminatingInstances().foreach { instance =>
-          streams.value.log.success("%s: %s => %s" format (
-            instance.getInstanceId(),
-            instance.getPreviousState().getName(),
-            instance.getCurrentState().getName()
-          ))
+        awsEc2.client.value.terminateInstances(request).getTerminatingInstances().foreach {
+          instance =>
+          streams.value.log.success(awsEc2.stateChangeFormat.value(instance))
         }
         streams.value.log.info(s"Clearing local instance collection group ${input}.")
         awsMongo.collection.value.find(filter).foreach {
@@ -277,7 +348,7 @@ object Plugin extends sbt.Plugin {
     },
 
     awsEc2.run := {
-      actionParser.parsed match {
+      awsParsers.ec2Action.parsed match {
         case (name, input) =>
         awsEc2.actions.value.find(_.name == name).foreach(_.execute(input))
       }
@@ -291,8 +362,9 @@ object Plugin extends sbt.Plugin {
       script =>
       streams.value.log.info("%s - %s" format (script.name, script.description))
     },
+
     awsSsh.upload := {
-      sshUploadParser.parsed match {
+      awsParsers.sshUpload.parsed match {
         case (group, localPath, remotePath) =>
         val query = MongoDBObject("group" -> group)
         awsMongo.collection.value.find(query).foreach {
@@ -303,8 +375,9 @@ object Plugin extends sbt.Plugin {
         }
       }
     },
+
     awsSsh.execute := {
-      sshExecuteParser.parsed match {
+      awsParsers.sshExecute.parsed match {
         case (group, command) =>
         val query = MongoDBObject("group" -> group)
         awsMongo.collection.value.find(query).foreach {
@@ -315,8 +388,9 @@ object Plugin extends sbt.Plugin {
         }
       }
     },
+
     awsSsh.run := {
-      sshActionParser.parsed match {
+      awsParsers.sshExecute.parsed match {
         case (script, group) =>
         awsSsh.scripts.value.find(_.name == script).foreach {
           script =>
