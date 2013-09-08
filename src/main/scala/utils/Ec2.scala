@@ -85,6 +85,18 @@ trait Ec2 {
   }
 
   /**
+   * Helper method to perform some task on potential instances
+   *
+   * @param group String
+   * @param requests Seq[NamedRequest]
+   * @param body (NamedRequest =&gt; Unit)
+   */
+  def spread(group: String, requests: Seq[NamedRequest])(body: NamedRequest => Unit) = group match {
+    case "*" => requests.par.foreach(body)
+    case input => requests.find(_.name == group).foreach(body)
+  }
+
+  /**
    * Helper method to perform some task on potential
    * instances
    *
@@ -92,11 +104,7 @@ trait Ec2 {
    * @param requests Seq[NamedRequest]
    * @param body (String, DescribeImagesRequest) =&gt; Unit
    */
-  def createRequest(group: String, requests: Seq[NamedRequest])(body: (String, ImageRequest) => Unit) = group match {
-    case "*" => requests.foreach(r => body(r.name, r.execute(new ImageRequest())))
-    case input => requests
-      .find(_.name == group)
-      .orElse(Some(Plugin.NamedAwsRequest("", (_.withFilters(new Filter("name", List(group)))))))
-      .foreach(r => body(r.name, r.execute(new ImageRequest())))
+  def createRequest(group: String, requests: Seq[NamedRequest])(body: (String, ImageRequest) => Unit) = {
+    spread(group, requests)(r => body(r.name, r.execute(new ImageRequest())))
   }
 }

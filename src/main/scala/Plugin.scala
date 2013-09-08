@@ -199,11 +199,12 @@ object Plugin extends sbt.Plugin {
         ).filter(_._2 != null))
       }.toList)
     }),
+
     awsEc2.stateChangeFormat := (instance =>
       "%s: %s => %s" format(
         instance.getInstanceId(),
-        instance.getCurrentState(),
-        instance.getPreviousState()
+        instance.getPreviousState().getName(),
+        instance.getCurrentState().getName()
       )
     ),
 
@@ -254,8 +255,9 @@ object Plugin extends sbt.Plugin {
         }
       })),
 
-      NamedAwsAction("start", "Starts an instance environment", { input =>
-        val query = MongoDBObject("group" -> input, "state" -> "stopped")
+      NamedAwsAction("start", "Starts an instance environment", (input => awsEc2.spread(input, awsEc2.requests.value) {
+        request =>
+        val query = MongoDBObject("group" -> request.name, "state" -> "stopped")
         val startRequest = new StartInstancesRequest(awsMongo.collection.value.find(query).map(_.as[String]("instanceId")).toList)
         awsEc2.client.value.startInstances(startRequest).getStartingInstances().foreach {
           instance =>
@@ -266,10 +268,11 @@ object Plugin extends sbt.Plugin {
           )
           awsEc2.started.value(awsMongo.collection.value.findOne(record).get)
         }
-      }),
+      })),
 
-      NamedAwsAction("stop", "Stops an instance environment", { input =>
-        val query = MongoDBObject("group" -> input, "state" -> "running")
+      NamedAwsAction("stop", "Stops an instance environment", (input => awsEc2.spread(input, awsEc2.requests.value) {
+        request =>
+        val query = MongoDBObject("group" -> request.name, "state" -> "running")
         val stopRequest = new StopInstancesRequest(awsMongo.collection.value.find(query).map(_.as[String]("instanceId")).toList)
         awsEc2.client.value.stopInstances(stopRequest).getStoppingInstances().foreach {
           instance =>
@@ -280,11 +283,12 @@ object Plugin extends sbt.Plugin {
           )
           awsEc2.stopped.value(awsMongo.collection.value.findOne(record).get)
         }
-      }),
+      })),
 
-      NamedAwsAction("alert", "Triggers on hot instances", { input =>
+      NamedAwsAction("alert", "Triggers on hot instances", (input => awsEc2.spread(input, awsEc2.requests.value) {
+        sRequest =>
         def describeRequest = {
-          val request = awsEc2.groupRequest(input, awsMongo.collection.value, "state" -> "pending")
+          val request = awsEc2.groupRequest(sRequest.name, awsMongo.collection.value, "state" -> "pending")
           if (request.getInstanceIds.isEmpty) None else Some(request)
         }
         do {
@@ -315,31 +319,33 @@ object Plugin extends sbt.Plugin {
             }
           }
           describeRequest foreach { _ =>
-            streams.value.log.info(s"Polling group ${input} for running state in the next ${awsEc2.pollingInterval.value / 1000} seconds.")
+            streams.value.log.info(s"Polling group ${sRequest.name} for running state in the next ${awsEc2.pollingInterval.value / 1000} seconds.")
             Thread.sleep(awsEc2.pollingInterval.value)
           }
         } while(describeRequest.isDefined)
-        streams.value.log.success(s"Group ${input} is hot.")
-      }),
+        streams.value.log.success(s"Group ${sRequest.name} is hot.")
+      })),
 
-      NamedAwsAction("status", "Checks on the environment status", { input =>
-        val request = awsEc2.groupRequest(input, awsMongo.collection.value)
+      NamedAwsAction("status", "Checks on the environment status", (input => awsEc2.spread(input, awsEc2.requests.value) {
+        sRequest =>
+        val request = awsEc2.groupRequest(sRequest.name, awsMongo.collection.value)
         val formats = awsEc2.client.value.describeInstances(request).getReservations().map(awsEc2.instanceFormat.value)
         streams.value.log.info(JSONArray(formats.toList).toString(awsEc2.jsonFormat.value))
-      }),
+      })),
 
-      NamedAwsAction("terminate", "Terminates the environment", { input =>
-        val filter = MongoDBObject("group" -> input)
+      NamedAwsAction("terminate", "Terminates the environment", (input => awsEc2.spread(input, awsEc2.requests.value) {
+        sRequest =>
+        val filter = MongoDBObject("group" -> sRequest.name)
         val request = new TerminateInstancesRequest(awsMongo.collection.value.find(filter).map(_.as[String]("instanceId")).toList)
         awsEc2.client.value.terminateInstances(request).getTerminatingInstances().foreach {
           instance =>
           streams.value.log.success(awsEc2.stateChangeFormat.value(instance))
         }
-        streams.value.log.info(s"Clearing local instance collection group ${input}.")
+        streams.value.log.info(s"Clearing local instance collection group ${sRequest.name}.")
         awsMongo.collection.value.find(filter).foreach {
           obj => awsMongo.collection.value -= obj
         }
-      })
+      }))
     ) },
 
     awsEc2.listActions := awsEc2.actions.value.foreach {
