@@ -61,7 +61,7 @@ Built-in actions are:
 - `status`: Checks the status of the group from Amazon
 - `terminate`: Terminates the group
 
-Once an instance is created, the `awsEc2.created` callback is invoked.
+Once an instance is created or started, the `awsEc2.started` callback is invoked.
 This callback is particularly useful for mapping elastic IP
 addresses, monitors, and status checks to newly created instances
 in the logical group.
@@ -165,7 +165,7 @@ the nodes to it.
 val seleniumJar = "java -jar selenium-server.jar"
 
 awsSsh.scripts += NamedSshScript("grid", execute = {
-  _.exec(s"${seleniumJar} -role hub")
+  _.exec(s"${seleniumJar} -role hub > /dev/null &2>1 &")
 })
 
 awsSsh.scripts += NamedSshScript("node", execute = {
@@ -174,7 +174,7 @@ awsSsh.scripts += NamedSshScript("node", execute = {
   awsMongo.collection.value.findOne(query) match {
     case Some(instance) =>
     val hubUrl = s"http://${instance("publicDns")}:4444/grid/register"
-    client.exec(s"${seleniumJar} -role node -hub ${hubUrl}")
+    client.exec(s"${seleniumJar} -role node -hub ${hubUrl} > /dev/null &2>1 &")
     case None => Left("Please create the hub >:(")
   }
 })
@@ -206,7 +206,7 @@ awsEc2.running := {
     awsSsh.scripts.value.find(_.name == "grid") foreach (execute)
     case "nodes" =>
     awsSsh.scripts.value.find(_.name == "node") foreach (execute)
-    case "app" =>
+    case _ =>
     streams.value.log.info("Instance is running.")
   }
 }
@@ -216,12 +216,14 @@ The running callbacks will fire upon logical group alert:
 
 ```
 > awsEc2Run create *
-> awsEc2Run alert *
+> awsEc2Run alert hub
+> awsEc2Run alert nodes
+> awsEc2Run alert app
 > assembly
 > awsSshRun deploy app
 ```
 
-Assuming that `test-run` will launch the Selenium test suite with an
+Assuming that `test:run` will launch the Selenium test suite with an
 arg to take in the hub url and app url:
 
 ```
@@ -232,15 +234,13 @@ arg to take in the hub url and app url:
 That'll give you the public DNS of the hub and app, respectively.
 
 ```
-> test-run http://hubPublicDns:4444/wd/hub http://appPublicDns
+> test:run http://hubPublicDns:4444/wd/hub http://appPublicDns
 ```
 
 Run it as much as you like until you are ready to destroy the groups.
 
 ```
-> awsEc2Run terminate app
-> awsEc2Run terminate nodes
-> awsEc2Run terminate hub
+> awsEc2Run terminate *
 ```
 
 Obviously, this process could be a improved a bit if the runner could
