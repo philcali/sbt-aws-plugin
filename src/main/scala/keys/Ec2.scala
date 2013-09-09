@@ -4,16 +4,6 @@ package keys
 import sbt._
 
 import com.amazonaws.services.ec2.AmazonEC2Client
-import com.amazonaws.services.ec2.model.{
-  Reservation,
-  Image,
-  Filter,
-  RunInstancesRequest,
-  DescribeImagesRequest => ImageRequest,
-  DescribeInstancesRequest,
-  TerminateInstancesRequest
-}
-
 import util.parsing.json.JSONFormat
 
 trait Ec2 {

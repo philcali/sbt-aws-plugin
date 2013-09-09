@@ -7,10 +7,8 @@ import com.amazonaws.services.ec2.model.{
 
 import util.parsing.json.{
   JSON,
-  JSONFormat,
   JSONObject,
-  JSONArray,
-  JSONType
+  JSONArray
 }
 
 trait NamedExecution[A,B] {

@@ -154,7 +154,7 @@ object Plugin extends sbt.Plugin {
     lazy val sshExecute: Def.Initialize[Parser[(String,String)]] =
       Def.setting {
         (Space ~> (tokizedNames(awsEc2.requests.value) <~ Space) ~
-        repsep(StringBasic.examples("command", "<arg1>", "<arg2>"), Space) map {
+        repsep(StringBasic.examples("command"), Space) map {
           case (group, commands) => group -> commands.mkString(" ")
         })
       }
@@ -391,7 +391,7 @@ object Plugin extends sbt.Plugin {
     },
 
     awsSsh.run := {
-      awsParsers.sshExecute.parsed match {
+      awsParsers.sshAction.parsed match {
         case (script, group) =>
         awsSsh.scripts.value.find(_.name == script).foreach {
           script =>
