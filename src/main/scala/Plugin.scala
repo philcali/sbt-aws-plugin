@@ -11,16 +11,12 @@ import com.amazonaws.auth.{
 }
 import com.amazonaws.services.ec2.AmazonEC2Client
 import com.amazonaws.services.ec2.model.{
-  Filter,
   Image,
   InstanceStateChange,
   DescribeImagesRequest => ImageRequest,
   DescribeInstancesRequest,
   Reservation,
-  RunInstancesRequest,
-  StartInstancesRequest,
-  StopInstancesRequest,
-  TerminateInstancesRequest
+  RunInstancesRequest
 }
 
 import collection.JavaConversions._
@@ -58,7 +54,7 @@ object Plugin extends sbt.Plugin {
   case class NamedSshScript(name: String, description: String = "", execute: SshClient => Either[String,Any]) extends NamedExecution[SshClient, Either[String,Any]]
 
   /**
-   * A named AWS action to be used in AwsEc2.actions
+   * A named AWS action to be used in awsEc2.actions
    *
    * @param name String
    * @param description String (Optional)
@@ -67,7 +63,7 @@ object Plugin extends sbt.Plugin {
   case class NamedAwsAction(name: String, description: String = "", execute: String => Unit) extends NamedExecution[String,Unit]
 
   /**
-   * A named AWS image request to be used in AwsEc2.requests
+   * A named AWS image request to be used in awsEc2.requests
    *
    * @param name String
    * @param execute (DescribeImagesRequest =&gt; DescribeImagesRequest)
@@ -255,34 +251,36 @@ object Plugin extends sbt.Plugin {
         }
       })),
 
-      NamedAwsAction("start", "Starts an instance environment", (input => awsEc2.spread(input, awsEc2.requests.value) {
-        request =>
-        val query = MongoDBObject("group" -> request.name, "state" -> "stopped")
-        val startRequest = new StartInstancesRequest(awsMongo.collection.value.find(query).map(_.as[String]("instanceId")).toList)
-        awsEc2.client.value.startInstances(startRequest).getStartingInstances().foreach {
-          instance =>
-          streams.value.log.success(awsEc2.stateChangeFormat.value(instance))
-          val record = MongoDBObject("instanceId" -> instance.getInstanceId())
-          awsMongo.collection.value += awsMongo.collection.value.findOne(record).getOrElse(record) ++ (
-            "state" -> "pending"
-          )
-          awsEc2.started.value(awsMongo.collection.value.findOne(record).get)
-        }
+      NamedAwsAction("start", "Starts an instance environment", (input =>
+      awsEc2.startRequest(
+        awsEc2.client.value,
+        input,
+        awsEc2.requests.value,
+        awsMongo.collection.value
+      ) {
+        instance =>
+        streams.value.log.success(awsEc2.stateChangeFormat.value(instance))
+        val record = MongoDBObject("instanceId" -> instance.getInstanceId())
+        awsMongo.collection.value += awsMongo.collection.value.findOne(record).getOrElse(record) ++ (
+          "state" -> "pending"
+        )
+        awsEc2.started.value(awsMongo.collection.value.findOne(record).get)
       })),
 
-      NamedAwsAction("stop", "Stops an instance environment", (input => awsEc2.spread(input, awsEc2.requests.value) {
-        request =>
-        val query = MongoDBObject("group" -> request.name, "state" -> "running")
-        val stopRequest = new StopInstancesRequest(awsMongo.collection.value.find(query).map(_.as[String]("instanceId")).toList)
-        awsEc2.client.value.stopInstances(stopRequest).getStoppingInstances().foreach {
-          instance =>
-          streams.value.log.success(awsEc2.stateChangeFormat.value(instance))
-          val record = MongoDBObject("instanceId" -> instance.getInstanceId())
-          awsMongo.collection.value += awsMongo.collection.value.findOne(record).getOrElse(record) ++ (
-            "state" -> "stopped"
-          )
-          awsEc2.stopped.value(awsMongo.collection.value.findOne(record).get)
-        }
+      NamedAwsAction("stop", "Stops an instance environment", (input =>
+      awsEc2.stopRequest(
+        awsEc2.client.value,
+        input,
+        awsEc2.requests.value,
+        awsMongo.collection.value
+      ) {
+        instance =>
+        streams.value.log.success(awsEc2.stateChangeFormat.value(instance))
+        val record = MongoDBObject("instanceId" -> instance.getInstanceId())
+        awsMongo.collection.value += awsMongo.collection.value.findOne(record).getOrElse(record) ++ (
+          "state" -> "stopped"
+        )
+        awsEc2.stopped.value(awsMongo.collection.value.findOne(record).get)
       })),
 
       NamedAwsAction("alert", "Triggers on hot instances", (input => awsEc2.spread(input, awsEc2.requests.value) {
@@ -319,7 +317,7 @@ object Plugin extends sbt.Plugin {
             }
           }
           describeRequest foreach { _ =>
-            streams.value.log.info(s"Polling group ${sRequest.name} for running state in the next ${awsEc2.pollingInterval.value / 1000} seconds.")
+            streams.value.log.info(s"Polling group ${sRequest.name} for running state in ${awsEc2.pollingInterval.value / 1000} seconds.")
             Thread.sleep(awsEc2.pollingInterval.value)
           }
         } while(describeRequest.isDefined)
@@ -333,18 +331,15 @@ object Plugin extends sbt.Plugin {
         streams.value.log.info(JSONArray(formats.toList).toString(awsEc2.jsonFormat.value))
       })),
 
-      NamedAwsAction("terminate", "Terminates the environment", (input => awsEc2.spread(input, awsEc2.requests.value) {
-        sRequest =>
-        val filter = MongoDBObject("group" -> sRequest.name)
-        val request = new TerminateInstancesRequest(awsMongo.collection.value.find(filter).map(_.as[String]("instanceId")).toList)
-        awsEc2.client.value.terminateInstances(request).getTerminatingInstances().foreach {
-          instance =>
-          streams.value.log.success(awsEc2.stateChangeFormat.value(instance))
-        }
-        streams.value.log.info(s"Clearing local instance collection group ${sRequest.name}.")
-        awsMongo.collection.value.find(filter).foreach {
-          obj => awsMongo.collection.value -= obj
-        }
+      NamedAwsAction("terminate", "Terminates the environment", (input =>
+      awsEc2.terminateRequest(
+        awsEc2.client.value,
+        input,
+        awsEc2.requests.value,
+        awsMongo.collection.value
+      ) {
+        instance =>
+        streams.value.log.success(awsEc2.stateChangeFormat.value(instance))
       }))
     ) },
 

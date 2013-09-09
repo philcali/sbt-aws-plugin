@@ -3,11 +3,15 @@ package utils
 
 import com.amazonaws.services.ec2.AmazonEC2Client
 import com.amazonaws.services.ec2.model.{
-  Image,
   Filter,
+  Image,
+  InstanceStateChange,
   RunInstancesRequest,
   DescribeImagesRequest => ImageRequest,
-  DescribeInstancesRequest
+  DescribeInstancesRequest,
+  StartInstancesRequest,
+  StopInstancesRequest,
+  TerminateInstancesRequest
 }
 
 import com.mongodb.casbah.Imports._
@@ -106,5 +110,74 @@ trait Ec2 {
    */
   def createRequest(group: String, requests: Seq[NamedRequest])(body: (String, ImageRequest) => Unit) = {
     spread(group, requests)(r => body(r.name, r.execute(new ImageRequest())))
+  }
+
+  /**
+   * Starts an instance environment
+   *
+   * @param client AmazonEC2Client
+   * @param group String
+   * @param requests Seq[NamedRequest]
+   * @param collection MongoCollection
+   */
+  def startRequest(
+    client: AmazonEC2Client,
+    group: String,
+    requests: Seq[NamedRequest],
+    collection: MongoCollection
+  )(body: InstanceStateChange => Unit) {
+    spread(group, requests) {
+      request =>
+      val query = MongoDBObject("group" -> request.name, "state" -> "stopped")
+      val startRequest = new StartInstancesRequest(collection.find(query).map(_.as[String]("instanceId")).toList)
+      client.startInstances(startRequest).getStartingInstances().foreach(body)
+    }
+  }
+
+  /**
+   * Stops an instance environment
+   *
+   * @param client AmazonEC2Client
+   * @param group String
+   * @param requests Seq[NamedRequest]
+   * @param collection MongoCollection
+   */
+  def stopRequest(
+    client: AmazonEC2Client,
+    group: String,
+    requests: Seq[NamedRequest],
+    collection: MongoCollection
+  )(body: InstanceStateChange => Unit) {
+    spread(group, requests) {
+      request =>
+      val query = MongoDBObject("group" -> request.name, "state" -> "running")
+      val stopRequest = new StopInstancesRequest(collection.find(query).map(_.as[String]("instanceId")).toList)
+      client.stopInstances(stopRequest).getStoppingInstances().foreach(body)
+    }
+  }
+
+  /**
+   * Terminates an instance environment
+   *
+   * @param client AmazonEC2Client
+   * @param group String
+   * @param requests Seq[NamedRequest]
+   * @param collection MongoCollection
+   */
+  def terminateRequest(
+    client: AmazonEC2Client,
+    group: String,
+    requests: Seq[NamedRequest],
+    collection: MongoCollection
+  )(body: InstanceStateChange => Unit) {
+    spread(group, requests) {
+      request =>
+      val query = MongoDBObject("group" -> request.name)
+      val terminateRequest = new TerminateInstancesRequest(collection.find(query).map(_.as[String]("instanceId")).toList)
+      client.terminateInstances(terminateRequest).getTerminatingInstances().foreach(body)
+      collection.find(query).foreach {
+        obj => collection -= obj
+      }
+    }
   }
 }
