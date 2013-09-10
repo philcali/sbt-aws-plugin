@@ -19,6 +19,7 @@ import com.mongodb.casbah.Imports._
 import collection.JavaConversions._
 
 trait Ec2 {
+
   /**
    * Utility method to create EC2 instances
    *
@@ -130,7 +131,15 @@ trait Ec2 {
       request =>
       val query = MongoDBObject("group" -> request.name, "state" -> "stopped")
       val startRequest = new StartInstancesRequest(collection.find(query).map(_.as[String]("instanceId")).toList)
-      client.startInstances(startRequest).getStartingInstances().foreach(body)
+      startRequest.getInstanceIds.isEmpty match {
+        case true =>
+        println(s"No instances found for group ${request.name}.")
+        case false =>
+        client
+          .startInstances(startRequest)
+          .getStartingInstances()
+          .foreach(body)
+      }
     }
   }
 
@@ -152,7 +161,15 @@ trait Ec2 {
       request =>
       val query = MongoDBObject("group" -> request.name, "state" -> "running")
       val stopRequest = new StopInstancesRequest(collection.find(query).map(_.as[String]("instanceId")).toList)
-      client.stopInstances(stopRequest).getStoppingInstances().foreach(body)
+      stopRequest.getInstanceIds.isEmpty match {
+        case true =>
+        println(s"No instances found for group ${request.name}.")
+        case false =>
+        client
+          .stopInstances(stopRequest)
+          .getStoppingInstances()
+          .foreach(body)
+      }
     }
   }
 
@@ -174,9 +191,17 @@ trait Ec2 {
       request =>
       val query = MongoDBObject("group" -> request.name)
       val terminateRequest = new TerminateInstancesRequest(collection.find(query).map(_.as[String]("instanceId")).toList)
-      client.terminateInstances(terminateRequest).getTerminatingInstances().foreach(body)
-      collection.find(query).foreach {
-        obj => collection -= obj
+      terminateRequest.getInstanceIds.isEmpty match {
+        case true =>
+        println(s"No instances found for group ${request.name}.")
+        case false =>
+        client
+          .terminateInstances(terminateRequest)
+          .getTerminatingInstances()
+          .foreach(body)
+        collection.find(query).foreach {
+          obj => collection -= obj
+        }
       }
     }
   }
