@@ -11,6 +11,7 @@ scalacOptions += "-deprecation"
 resolvers += "spray repo" at "http://repo.spray.io"
 
 libraryDependencies ++= Seq(
+  "org.slf4j" % "jcl-over-slf4j" % "1.7.5",
   "com.amazonaws" % "aws-java-sdk" % "1.1.7.1",
   "org.mongodb" %% "casbah" % "2.6.2",
   "com.decodified" % "scala-ssh_2.10" % "0.6.4",
