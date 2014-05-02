@@ -4,7 +4,7 @@ name := "sbt-aws-plugin"
 
 organization := "com.github.philcali"
 
-version := "0.1.0"
+version := "0.1.1"
 
 scalacOptions += "-deprecation"
 
@@ -12,7 +12,7 @@ resolvers += "spray repo" at "http://repo.spray.io"
 
 libraryDependencies ++= Seq(
   "org.slf4j" % "jcl-over-slf4j" % "1.7.5",
-  "com.amazonaws" % "aws-java-sdk" % "1.1.7.1",
+  "com.amazonaws" % "aws-java-sdk" % "1.7.6",
   "org.mongodb" %% "casbah" % "2.6.2",
   "com.decodified" % "scala-ssh_2.10" % "0.6.4",
   "ch.qos.logback" % "logback-classic" % "1.0.13",
